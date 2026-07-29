@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh" data-mantine-color-scheme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OJ Solver</title>
+<style>
+:root {
+  --bg: #1a1b2e; --panel: #222440; --border: #313458; --text: #d0d4f0;
+  --accent: #7b6cf6; --green: #4ecf8c; --red: #f0506e; --yellow: #f0cf50;
+  --radius: 8px; --font: 'Segoe UI', system-ui, sans-serif; --mono: 'Cascadia Code', 'Fira Code', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+.header { background: var(--panel); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+.header h1 { font-size: 20px; font-weight: 600; }
+.header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); }
+.header .dot.off { background: var(--border); }
+.tabs { display: flex; gap: 4px; margin-bottom: 24px; }
+.tab { padding: 8px 20px; border-radius: 6px 6px 0 0; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; color: #888; background: transparent; }
+.tab.active { color: var(--accent); border-color: var(--border); border-bottom-color: var(--panel); background: var(--panel); }
+.main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+.main > div { display: none; }
+.main > div.active { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 800px) { .main > div.active { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+.card h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: #b8bcf0; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
+.card h2 .expand { margin-left: auto; cursor: pointer; font-size: 18px; color: #888; }
+label { display: block; font-size: 12px; color: #888cb0; margin-bottom: 4px; margin-top: 10px; }
+input, select, textarea { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 6px; background: #1a1b2e; color: var(--text); font-size: 13px; font-family: var(--font); resize: vertical; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { font-family: var(--mono); font-size: 12px; }
+.config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+.config-grid .full { grid-column: 1 / -1; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .15s; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { filter: brightness(1.15); }
+.btn-green { background: var(--green); color: #111; }
+.btn-red { background: var(--red); color: #fff; }
+.btn-gray { background: #333; color: #aaa; }
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.btn-outline:hover { border-color: var(--accent); }
+.btn-group { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.console { background: #0d0e1a; border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; height: 500px; overflow-y: auto; font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+.console .dim { color: #555; }
+.console .warn { color: var(--yellow); }
+.console .err { color: var(--red); }
+.console .ok { color: var(--green); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge-on { background: #1a3a2a; color: var(--green); }
+.badge-off { background: #2a1a1a; color: #666; }
+.small { font-size: 12px; color: #888; }
+.mt8 { margin-top: 8px; }
+.msg { padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-top: 8px; display: none; }
+.msg-ok { background: #1a3a2a; color: var(--green); }
+.msg-err { background: #2a1a1a; color: var(--red); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="dot {{'off' if not daemon_running else ''}}" id="daemon-dot"></div>
+  <h1>OJ Solver</h1>
+  <span class="badge {{'badge-on' if daemon_running else 'badge-off'}}" id="daemon-badge">{{'守护运行中' if daemon_running else '守护已停止'}}</span>
+</div>
+
+<div class="tabs" style="max-width:1200px;margin:20px auto 0;padding:0 24px;">
+  <button class="tab active" onclick="switchTab('solve')">求解</button>
+  <button class="tab" onclick="switchTab('config')">配置</button>
+</div>
+
+<div class="main">
+  <!-- ===== 求解面板 ===== -->
+  <div id="tab-solve" class="active">
+    <div>
+      <div class="card">
+        <h2>单个题目</h2>
+        <form onsubmit="solveSingle(event)">
+          <label>题目链接或 ID</label>
+          <input id="url" placeholder="https://oj.yuanyicode.com/p/1178 或 1178">
+          <div class="btn-group">
+            <button class="btn btn-primary" type="submit">求解并提交</button>
+            <button class="btn btn-outline" type="button" onclick="solveSingle(event, true)">仅生成题解</button>
+            <button class="btn btn-outline" type="button" onclick="dryRun()">仅抓取题目</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>比赛批量</h2>
+        <form onsubmit="solveContest(event)">
+          <label>比赛 / 题目链接</label>
+          <input id="contest-url" placeholder="https://oj.yuanyicode.com/d/domain/contest/xxx">
+          <div class="btn-group">
+            <button class="btn btn-green" type="submit">批量求解</button>
+            <button class="btn btn-outline" type="button" onclick="solveContest(event, true)">仅生成题解</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>比赛守护</h2>
+        <p class="small">监控域名，自动为已结束的比赛编写题解。</p>
+        <div class="btn-group">
+          <button class="btn btn-green" id="btn-daemon-start" onclick="daemon('start')">启动守护</button>
+          <button class="btn btn-red" id="btn-daemon-stop" onclick="daemon('stop')" disabled>停止守护</button>
+          <button class="btn btn-outline" onclick="daemon('once')">仅检查一次</button>
+        </div>
+        <div class="small mt8" id="daemon-interval"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>控制台 <span id="task-badge" class="badge badge-off" style="display:none">运行中</span></h2>
+      <div class="btn-group" style="margin-top:0;margin-bottom:10px;">
+        <button class="btn btn-red" id="btn-kill" onclick="killTask()" disabled>终止任务</button>
+        <button class="btn btn-outline" onclick="clearLog()">清屏</button>
+      </div>
+      <div class="console" id="console">等待操作...</div>
+    </div>
+    <div class="card">
+      <h2>最近记录</h2>
+      <div id="history" style="font-size:12px;color:#888;max-height:200px;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- ===== 配置面板 ===== -->
+  <div id="tab-config" style="grid-template-columns:1fr 1fr;">
+    <div class="card">
+      <h2>OJ 账户</h2>
+      <label>根地址</label><input id="cfg-oj-root">
+      <label>API 前缀</label><input id="cfg-oj-base">
+      <div class="config-grid">
+        <div><label>用户名</label><input id="cfg-oj-user"></div>
+        <div><label>密码</label><input id="cfg-oj-pass" type="password"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>AI 模型</h2>
+      <label>API 地址</label><input id="cfg-ai-url" placeholder="https://api.deepseek.com">
+      <label>API Key（sk-xxx 或环境变量名）</label><input id="cfg-ai-key">
+      <div class="config-grid">
+        <div><label>模型</label><input id="cfg-ai-model"></div>
+        <div><label>推理强度</label>
+          <select id="cfg-ai-reasoning">
+            <option value="low">low</option><option value="medium">medium</option>
+            <option value="high" selected>high</option><option value="max">max</option>
+          </select>
+        </div>
+        <div><label>最大输出 Token</label><input id="cfg-ai-maxtok" type="number"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>代码设置</h2>
+      <label>提交语言 ID</label><input id="cfg-code-lang" placeholder="cc.cc14o2">
+      <p class="small mt8">C++14: cc.cc14o2 | Python3: py.py3 | Java: java</p>
+    </div>
+    <div class="card">
+      <h2>监控守护</h2>
+      <label>监测域名（逗号分隔）</label><input id="cfg-mon-domains" placeholder="system, yuanyi__contestForPrimary">
+      <label>检查间隔（秒）</label><input id="cfg-mon-interval" type="number">
+      <label>状态文件</label><input id="cfg-mon-state" placeholder="processed_contests.json">
+    </div>
+    <div class="card full" style="grid-column: 1 / -1;">
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="loadConfig()">刷新配置</button>
+        <button class="btn btn-green" onclick="saveConfig()">保存配置</button>
+        <span class="msg" id="cfg-msg"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const con = document.getElementById('console');
+const evtSource = new EventSource('/stream');
+evtSource.onmessage = function(e) {
+  let html = '';
+  for (const line of JSON.parse(e.data)) {
+    const span = document.createElement('span');
+    span.textContent = line + '\n';
+    if (line.includes('[-]') || line.includes('ERROR')) span.className = 'err';
+    else if (line.includes('[+]') || line.includes('成功') || line.includes('AC')) span.className = 'ok';
+    con.appendChild(span);
+  }
+  con.scrollTop = con.scrollHeight;
+};
+
+function post(path, body) {
+  return fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }).then(r => r.json());
+}
+
+function solveSingle(e, noSubmit) {
+  e.preventDefault();
+  const url = document.getElementById('url').value.trim();
+  if (!url) return;
+  const args = [url];
+  if (noSubmit) args.push('--no-submit');
+  post('/run/oj_solver', {args});
+}
+
+function dryRun() {
+  const url = document.getElementById('url').value.trim();
+  if (!url) return;
+  post('/run/oj_solver', {args: [url, '--dry-run']});
+}
+
+function solveContest(e, noSubmit) {
+  e.preventDefault();
+  const url = document.getElementById('contest-url').value.trim();
+  if (!url) return;
+  const args = [url];
+  if (noSubmit) args.push('--no-submit');
+  post('/run/contest_solver', {args});
+}
+
+function daemon(action) {
+  post('/daemon/' + action, {});
+  setTimeout(updateDaemonStatus, 1000);
+}
+
+function updateDaemonStatus() {
+  fetch('/status').then(r => r.json()).then(s => {
+    const on = s.daemon_running;
+    document.getElementById('daemon-dot').className = 'dot' + (on ? '' : ' off');
+    document.getElementById('daemon-badge').textContent = on ? '守护运行中' : '守护已停止';
+    document.getElementById('daemon-badge').className = 'badge ' + (on ? 'badge-on' : 'badge-off');
+    document.getElementById('btn-daemon-start').disabled = on;
+    document.getElementById('btn-daemon-stop').disabled = !on;
+    // 任务状态
+    const tr = s.task_running;
+    const badge = document.getElementById('task-badge');
+    badge.style.display = tr ? 'inline-block' : 'none';
+    badge.className = 'badge ' + (tr ? 'badge-on' : 'badge-off');
+    document.getElementById('btn-kill').disabled = !tr;
+  });
+  // 刷新历史
+  fetch('/history').then(r => r.json()).then(items => {
+    const h = document.getElementById('history');
+    h.textContent = '';
+    if (items.length) {
+      for (const i of items.reverse()) {
+        const div = document.createElement('div');
+        div.style.cssText = 'margin:2px 0;font-family:monospace';
+        div.textContent = `[${i.time}] ${i.cmd.substring(0,60)}... → ${i.code===0?'OK':i.code}`;
+        h.appendChild(div);
+      }
+    } else {
+      h.textContent = '暂无记录';
+    }
+  });
+}
+
+function killTask() {
+  fetch('/kill', {method:'POST'});
+}
+
+function clearLog() {
+  document.getElementById('console').innerHTML = '';
+  fetch('/clear', {method:'POST'});
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab[onclick*="'+name+'"]').forEach(t => t.classList.add('active'));
+  document.querySelectorAll('.main > div').forEach(d => d.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'config') loadConfig();
+}
+
+function showMsg(text, ok) {
+  const m = document.getElementById('cfg-msg');
+  m.textContent = text; m.className = 'msg ' + (ok ? 'msg-ok' : 'msg-err');
+  m.style.display = 'block';
+  setTimeout(() => m.style.display = 'none', 3000);
+}
+
+async function loadConfig() {
+  const r = await fetch('/config');
+  const c = await r.json();
+  const oj = c.oj || {}, ai = c.ai || {}, code = c.code || {}, mon = c.monitor || {};
+  document.getElementById('cfg-oj-root').value = oj.root || '';
+  document.getElementById('cfg-oj-base').value = oj.base || '';
+  document.getElementById('cfg-oj-user').value = oj.username || '';
+  document.getElementById('cfg-oj-pass').value = oj.password || '';
+  document.getElementById('cfg-ai-url').value = ai.base_url || '';
+  // API Key 仅显示是否已配置，不暴露任何部分
+  const hasKey = ai.api_key_configured || false;
+  document.getElementById('cfg-ai-key').value = hasKey ? '(已配置)' : '';
+  document.getElementById('cfg-ai-key').placeholder = hasKey ? '已配置，输入新值覆盖' : 'sk-xxx 或 AI_API_KEY 环境变量名';
+  document.getElementById('cfg-ai-key').dataset.configured = hasKey ? '1' : '0';
+  document.getElementById('cfg-ai-model').value = ai.model || '';
+  document.getElementById('cfg-ai-reasoning').value = ai.reasoning_effort || 'high';
+  document.getElementById('cfg-ai-maxtok').value = ai.max_tokens || 32768;
+  document.getElementById('cfg-code-lang').value = code.lang || '';
+  document.getElementById('cfg-mon-domains').value = (mon.domains || []).join(', ');
+  document.getElementById('cfg-mon-interval').value = mon.interval || 600;
+  document.getElementById('cfg-mon-state').value = mon.state_file || '';
+}
+
+async function saveConfig() {
+  const keyInput = document.getElementById('cfg-ai-key');
+  const keyValue = keyInput.value.trim();
+  const wasConfigured = keyInput.dataset.configured === '1';
+  // 仅当用户输入了新内容时才传输 Key
+  const keyChanged = keyValue !== '' && (keyValue !== '(已配置)' || !wasConfigured);
+  const aiPayload = {
+    base_url: document.getElementById('cfg-ai-url').value.trim(),
+    model: document.getElementById('cfg-ai-model').value.trim(),
+    reasoning_effort: document.getElementById('cfg-ai-reasoning').value,
+    max_tokens: parseInt(document.getElementById('cfg-ai-maxtok').value) || 32768,
+  };
+  // 仅当用户修改了 Key 时才传输新值
+  if (keyChanged && keyValue) {
+    aiPayload.ai_api_key = keyValue;
+  }
+  const payload = {
+    oj: {
+      root: document.getElementById('cfg-oj-root').value.trim(),
+      base: document.getElementById('cfg-oj-base').value.trim(),
+      username: document.getElementById('cfg-oj-user').value.trim(),
+      password: document.getElementById('cfg-oj-pass').value,
+    },
+    ai: aiPayload,
+    code: {
+      lang: document.getElementById('cfg-code-lang').value.trim(),
+      lang_display: document.getElementById('cfg-code-lang').value.trim(),
+    },
+    monitor: {
+      domains: document.getElementById('cfg-mon-domains').value.split(',').map(s => s.trim()).filter(Boolean),
+      interval: parseInt(document.getElementById('cfg-mon-interval').value) || 600,
+      state_file: document.getElementById('cfg-mon-state').value.trim(),
+    }
+  };
+  const r = await fetch('/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (r.ok) showMsg('配置已保存', true);
+  else showMsg('保存失败', false);
+}
+
+// 首次加载
+updateDaemonStatus();
+setInterval(updateDaemonStatus, 5000);
+</script>
+</body></html>
