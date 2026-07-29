@@ -215,9 +215,3 @@ python -m pytest test_core.py -q    # 33 个单元测试
 | `OJ_TD_MODEL` | 测试数据补充模型 |
 | `OJ_BENCHMARK_MODEL` | 标程题解模型 |
 | `OJ_DELAY_MODE` | 延迟模式开关 (≥20题自动) |
-
----
-
-## License
-
-MIT

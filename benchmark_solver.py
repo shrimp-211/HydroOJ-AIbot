@@ -175,16 +175,17 @@ class BenchmarkSolver:
             for psdoc in r.json().get("psdocs", []):
                 if pat.search(psdoc.get("content", "")):
                     return True
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("[!] 题解检测异常 %s/%s: %s", domain, pid, str(e)[:80])
         return False
 
     # ── AI 解读代码 ──
     def interpret_code(self, problem: dict, code: str, author_uid: str) -> dict | None:
-        """用 AI 解读标程用户代码，生成题解。
-        返回: {solution_md, usage, cost, elapsed_s} 或 None
-        """
+        """用 AI 解读标程用户代码。"""
         from openai import OpenAI
+        if os.environ.get("OJ_DELAY_MODE") == "1":
+            from oj_solver import _ai_delay
+            _ai_delay()
         config = load_config()
         base_url = config.get("ai_base_url", "https://api.deepseek.com")
         api_key = os.environ.get("AI_API_KEY", "")

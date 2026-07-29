@@ -75,7 +75,8 @@ def has_existing_solution(session, base_url, domain_id, pid, uid):
         for doc in r.json().get("psdocs", []):
             if doc.get("owner") == uid: return True
     except Exception as e:
-        log.debug("[!] 检查已有题解异常: %s", e)
+        log.warning("[!] 检查已有题解异常 #%s: %s — 保守跳过", pid, str(e)[:80])
+        return True  # 不确定时跳过，防止重复
     return False
 
 

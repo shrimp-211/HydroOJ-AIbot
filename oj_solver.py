@@ -437,7 +437,17 @@ class OJClient:
     # ---- 登录 ----
     def login(self, max_retries: int = 3) -> bool:
         if self.logged_in:
-            log.info("[*] 已登录（cookie 复用），跳过登录"); return True
+            # 验证 cookie 是否仍然有效
+            try:
+                r = self.session.get(f"{self.api_base}/p/1",
+                                     headers={"Accept": "application/json"}, timeout=10)
+                if r.status_code == 200:
+                    log.info("[*] 已登录（cookie 复用）"); return True
+                log.warning("[!] Cookie 已过期，重新登录")
+                self.logged_in = False
+            except Exception:
+                log.warning("[!] Cookie 验证失败，重新登录")
+                self.logged_in = False
         log.info("[*] 登录 %s ...", self.root)
         if not self.config["username"] or not self.config["password"]:
             log.error("[-] 未配置 OJ 凭据（检查 OJ_USERNAME/OJ_PASSWORD 环境变量或 config.json）")
@@ -910,10 +920,12 @@ class SolverOrchestrator:
                 if m_tag:
                     final_tags = [t.strip() for t in m_tag.group(1).split(",") if t.strip()]
                     solution_md = solution_md[m_tag.end():].lstrip()
-                total_usage = dict(result.get("usage", {}))
-                total_elapsed = result.get("elapsed_s", 0)
-                total_cost = result.get("cost", 0)
-                banner = self._code_banner(usage=total_usage, cost=total_cost)
+                fu = result.get("usage", {})
+                for k in ("input", "output", "total", "cache_hit"):
+                    total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
+                total_elapsed += result.get("elapsed_s", 0)
+                total_cost += result.get("cost", 0)
+                banner = self._code_banner(usage=fu, cost=result.get("cost", 0))
 
                 history = [
                     {"role": "system", "content": self.ai.SYS_SOLVE},
