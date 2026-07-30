@@ -26,6 +26,7 @@ class RateLimiter:
 _oj_limiter = RateLimiter(2.0)
 _ai_limiter = RateLimiter(2.0)
 _delay_mode = False
+_session_lock = threading.Lock()  # 共享 session 线程安全
 
 from oj_common import (load_dotenv, create_session, parse_contest_or_problem,
                         parse_problem_url, fetch_user_id, oj_login)
@@ -69,8 +70,9 @@ def _push(text: str, to_uid: int = 0, event: str = ""):
 
 def has_existing_solution(session, base_url, domain_id, pid, uid):
     try:
-        r = session.get(f"{base_url}/d/{domain_id}/p/{pid}/solution",
-                        headers={"Accept": "application/json"}, timeout=15)
+        with _session_lock:
+            r = session.get(f"{base_url}/d/{domain_id}/p/{pid}/solution",
+                            headers={"Accept": "application/json"}, timeout=15)
         if r.status_code != 200: return False
         for doc in r.json().get("psdocs", []):
             if doc.get("owner") == uid: return True

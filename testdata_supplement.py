@@ -16,7 +16,7 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
-from oj_common import (load_dotenv, create_session, oj_login, load_config,
+from oj_common import (load_dotenv, create_session, smart_login, load_config,
                        parse_contest_or_problem, parse_problem_url)
 
 log = logging.getLogger("testdata_supplement")

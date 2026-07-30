@@ -184,6 +184,28 @@ def create_session(verify_ssl: bool = True) -> requests.Session:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 智能登录 — cookie 复用减少登录频率
+# ═══════════════════════════════════════════════════════════════
+def smart_login(session, root: str, username: str, password: str,
+                cookie_jar: str = ".oj_cookies.json") -> bool:
+    """智能登录：优先复用 cookie，仅失效时重新登录。"""
+    # 1. 尝试加载 cookie
+    if load_cookies(session, cookie_jar):
+        try:
+            r = session.get(f"{root}/d/system/p/1",
+                            headers={"Accept": "application/json"}, timeout=10)
+            if r.status_code == 200:
+                return True
+        except Exception:
+            pass
+    # 2. 完整登录
+    if oj_login(session, root, username, password):
+        save_cookies(session, cookie_jar)
+        return True
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════
 # Cookie 持久化
 # ═══════════════════════════════════════════════════════════════
 def load_cookies(session: requests.Session, path: str) -> bool:

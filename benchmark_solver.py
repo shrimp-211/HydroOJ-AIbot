@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
-from oj_common import (load_dotenv, create_session, oj_login, load_config,
+from oj_common import (load_dotenv, create_session, smart_login, load_config,
                        parse_contest_or_problem, parse_problem_url)
 
 log = logging.getLogger("benchmark_solver")
@@ -33,7 +33,7 @@ class BenchmarkSolver:
         self.processed = self._load_processed()
 
     def login(self) -> bool:
-        return oj_login(self.session, self.root, self.username, self.password)
+        return smart_login(self.session, self.root, self.username, self.password)
 
     # ── 持久化 ──
     def _load_processed(self) -> set:
