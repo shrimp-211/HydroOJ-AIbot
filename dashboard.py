@@ -117,7 +117,8 @@ class Dashboard:
                         t = _time.mktime(_time.strptime(r.started_at, "%m-%d %H:%M:%S"))
                         if _time.time() - t > 1800:
                             continue
-                    except (ValueError, OSError):
+                    except (ValueError, OSError, OverflowError):
+                        # Windows mktime 不支持 1900 年日期(%m-%d 解析无年份), 会抛 OverflowError
                         pass
                 result.append(r.to_dict())
             return result
@@ -169,7 +170,7 @@ class Dashboard:
                 elapsed = time.time() - time.mktime(
                     time.strptime(r["started_at"], "%m-%d %H:%M:%S")
                 ) if r.get("started_at") else 0
-            except (ValueError, OSError):
+            except (ValueError, OSError, OverflowError):
                 elapsed = 0
             tinfo = f" | Token {r['tokens_in']}i/{r['tokens_out']}o"
             if r.get("cache_hit"): tinfo += f" (缓存{r['cache_hit']})"
