@@ -27,13 +27,19 @@ if sys.platform == "win32" and sys.stdout.isatty():
 
 
 def _script_dir() -> Path:
-    """脚本目录。兼容 __file__ 缺失的嵌入/面板运行环境（如 MCSManager exec 启动）。"""
+    """脚本目录。兼容 __file__ 缺失的嵌入/面板运行环境（如 MCSManager exec 启动）。
+    优先返回包含本脚本的目录，避免 argv[0] 指向解释器时路径错误。"""
+    candidates = []
     f = globals().get("__file__")
     if f:
-        return Path(f).resolve().parent
-    if sys.argv and sys.argv[0] and os.path.isfile(sys.argv[0]):
-        return Path(sys.argv[0]).resolve().parent
-    return Path.cwd()
+        candidates.append(Path(f).resolve().parent)
+    if sys.argv and sys.argv[0]:
+        candidates.append(Path(sys.argv[0]).resolve().parent)
+    candidates.append(Path.cwd())
+    for d in candidates:
+        if (d / "contest_daemon.py").exists():
+            return d
+    return candidates[0]
 
 
 # ═══════════════════════════════════════════════════
@@ -438,22 +444,29 @@ def main():
         env = os.environ.copy()
         if reply_uid > 0:
             env["OJ_REQUESTER"] = str(reply_uid)
-            env["OJ_USERNAME"] = os.environ.get("OJ_USERNAME","")
-            env["OJ_PASSWORD"] = os.environ.get("OJ_PASSWORD","")
+            # 环境变量缺失时回退到 config 读取的凭据，避免子进程登录失败
+            env["OJ_USERNAME"] = os.environ.get("OJ_USERNAME") or username
+            env["OJ_PASSWORD"] = os.environ.get("OJ_PASSWORD") or password
 
         if info["type"] == "problem":
             pid = info["pids"][0]
             log.info("[*] 求解: #%s", pid)
             dash.problem_start(pid, title=info.get("title", ""))
-            subprocess.Popen([sys.executable, sp_one, url, "--no-show-thinking"],
-                            cwd=str(Path(sp_one).parent), env=env)
+            try:
+                subprocess.Popen([sys.executable, sp_one, url, "--no-show-thinking"],
+                                cwd=str(Path(sp_one).parent), env=env)
+            except OSError as e:
+                return f"❌ #{pid} 启动失败: {e}"
             return f"🔄 #{pid} 已开始求解，完成后会自动回复结果"
         else:
             cid = info.get("contest_id") or info.get("training_id", url.split('/')[-1][:20])
             title = info.get("title", cid)
             log.info("[*] 求解: %s", title)
-            subprocess.Popen([sys.executable, str(sp), url, "--no-accum"],
-                            cwd=str(Path(sp).parent), env=env)
+            try:
+                subprocess.Popen([sys.executable, str(sp), url, "--no-accum"],
+                                cwd=str(Path(sp).parent), env=env)
+            except OSError as e:
+                return f"❌ {title} 启动失败: {e}"
             return f"🔄 {title} 已启动（{len(info.get('pids',[]))}题），完成后会自动回复结果"
 
     def _push_event_impl(text: str):

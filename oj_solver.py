@@ -801,9 +801,13 @@ class SolverOrchestrator:
         """
         log.info("\n" + "=" * 50 + f"\n  OJ Auto Solver — #{pid}\n" + "=" * 50)
 
-        if not self.oj.login(): return
+        if not self.oj.login():
+            self._notify_error(f"❌ #{pid} 登录失败，请检查 OJ 凭据")
+            return
         problem = self.oj.get_problem(pid)
-        if not problem: return
+        if not problem:
+            self._notify_error(f"❌ #{pid} 获取题目失败，可能无权限或链接错误")
+            return
 
         total_usage, total_elapsed, total_cost = {}, 0.0, 0.0
         all_rids, all_verdicts = [], []
@@ -1106,6 +1110,17 @@ class SolverOrchestrator:
                 "model": self.config["ai_model"],
                 "is_cost_capped": is_cost_capped}
 
+    def _notify_error(self, text: str):
+        """求解失败时通知请求者（OJ_REQUESTER），避免静默失败无回复。"""
+        try:
+            requester = int(os.environ.get("OJ_REQUESTER", 0))
+            if requester <= 0:
+                return
+            from oj_common import push_oj_message
+            push_oj_message(self.oj.session, self.oj.root, text, push_uids=[requester])
+        except Exception:
+            pass
+
     def _notify_solve_result(self, problem: dict, is_ac: bool, verdict: dict | None,
                              usage: dict, cost: float):
         """通过私信通知求解结果"""
@@ -1283,8 +1298,20 @@ def main():
                 oj.post_solution(args.pid, md + footer)
         return
 
-    solver.solve(args.pid, submit=not args.no_submit, post=not args.no_post,
-                  use_stream=args.stream, accumulate=False)
+    try:
+        solver.solve(args.pid, submit=not args.no_submit, post=not args.no_post,
+                     use_stream=args.stream, accumulate=False)
+    except Exception as e:
+        log.error("[!] 求解异常: %s", e)
+        requester = int(os.environ.get("OJ_REQUESTER", 0))
+        if requester > 0:
+            try:
+                from oj_common import push_oj_message
+                push_oj_message(oj.session, oj.root, f"❌ 求解异常: {str(e)[:100]}",
+                                push_uids=[requester])
+            except Exception:
+                pass
+        sys.exit(1)
 
 
 if __name__ == "__main__":
