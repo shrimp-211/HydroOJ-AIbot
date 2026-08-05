@@ -48,7 +48,10 @@ class Dashboard:
     使用方式：守护进程持有唯一实例，子进程结果通过 daemon 调用 update 方法写入。"""
 
     def __init__(self, save_path: str = "dashboard.json", max_records: int = 500):
-        self._lock = threading.Lock()
+        # 必须用可重入锁：problem_start/save 等在持锁后调用
+        # _mark_dirty/_flush，后者内部再次获取同一把锁，非重入锁会死锁，
+        # 导致 dispatch 单题求解后主循环永久卡死。
+        self._lock = threading.RLock()
         self._save_path = Path(save_path)
         self._max = max_records
         self._last_save = 0.0
