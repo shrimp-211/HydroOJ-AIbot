@@ -61,11 +61,11 @@ def setup_logging(quiet: bool = False, verbose: bool = False,
 
 
 # ═══════════════════════════════════════════════════════════════
-# 共享推送
+# 通用限速器 + 共享推送
 # ═══════════════════════════════════════════════════════════════
-class _MsgLimiter:
-    """进程级私信推送限速器 — 避免突发 POST 触发 OJ WAF 403。"""
-    def __init__(self, min_interval: float = 0.6):
+class RateLimiter:
+    """进程级限速器 — 两次 wait() 至少间隔 min_interval 秒。线程安全。"""
+    def __init__(self, min_interval: float = 2.0):
         self._min = min_interval
         self._last = 0.0
         self._lock = threading.Lock()
@@ -78,7 +78,7 @@ class _MsgLimiter:
                 time.sleep(gap)
             self._last = time.monotonic()
 
-MSG_LIMITER = _MsgLimiter(0.6)
+MSG_LIMITER = RateLimiter(0.6)  # 私信推送限速，避免突发 POST 触发 OJ WAF 403
 
 _last_relogin = 0.0
 _relogin_lock = threading.Lock()

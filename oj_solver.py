@@ -323,6 +323,12 @@ class AIClient:
                 usage.get("cache_hit", 0) * cache_price) / 1_000_000
         return round(cost, 6)
 
+    @staticmethod
+    def _extract_code(content: str, ext: str) -> str:
+        """从 AI 响应中提取最后一个代码块。"""
+        blocks = list(re.finditer(rf"```(?:{ext}|c\+\+|c)\s*\n(.+?)```", content, re.DOTALL))
+        return blocks[-1].group(1).strip() if blocks else ""
+
     def _parse_response(self, content: str, reasoning: str, usage_obj,
                         t_start: float) -> dict:
         """统一解析 AI 响应：提取代码、Token、耗时、费用"""
@@ -331,11 +337,7 @@ class AIClient:
         if reasoning and self._show_thinking:
             log.info("    --- 思考过程 (%d 字符) ---", len(reasoning))
             log.info(reasoning[:3000])
-        ext = self.config.lang_ext
-        code = ""
-        blocks = list(re.finditer(rf"```(?:{ext}|c\+\+|c)\s*\n(.+?)```", content, re.DOTALL))
-        if blocks:
-            code = blocks[-1].group(1).strip()
+        code = self._extract_code(content, self.config.lang_ext)
         usage = self._extract_usage(usage_obj)
         cost = self._calc_cost(usage)
         elapsed = time.monotonic() - t_start
@@ -345,22 +347,14 @@ class AIClient:
         return {"solution_md": content, "code": code, "raw": content,
                 "usage": usage, "elapsed_s": elapsed, "cost": cost}
 
-    # ---- 连续对话调用 ----
+    # ---- 连续对话调用（复用 chat()，避免重复请求构建逻辑） ----
     def _call_ai_with_messages(self, messages: list, use_stream: bool = False) -> dict | None:
-        if self._get_client() is None: log.error("[-] API Key 未配置"); return None
-        try:
-            t_start = time.monotonic()
-            content, reasoning, usage_obj = (self._stream_call(self._build_args(messages))
-                                             if use_stream else self._block_call(self._build_args(messages)))
-            return self._parse_response(content, reasoning, usage_obj, t_start)
-        except requests.RequestException as e:
-            log.error("[-] AI 网络异常: %s", e); return None
-        except Exception as e:
-            msg = str(e)
-            if "timed out" in msg.lower():
-                log.error("[-] AI 请求超时 — %s", self.config.get_model_base_url(self.config["ai_model"]))
-            else: log.error("[-] AI 调用异常: %s", e)
+        r = self.chat(messages, use_stream=use_stream)
+        if not r:
             return None
+        code = self._extract_code(r["content"], self.config.lang_ext)
+        return {"solution_md": r["content"], "code": code, "raw": r["content"],
+                "usage": r["usage"], "elapsed_s": r["elapsed_s"], "cost": r["cost"]}
 
     # ---- 核心调用 ----
     def _call_ai(self, user_prompt: str, system_msg: str,

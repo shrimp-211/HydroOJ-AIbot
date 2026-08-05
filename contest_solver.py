@@ -5,64 +5,38 @@ import os, re, sys, json, time, logging, argparse, threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ═══════════════════════════════════════════════
-# 限流器 — 同服务请求至少间隔 min_interval 秒
-# ═══════════════════════════════════════════════
-class RateLimiter:
-    def __init__(self, min_interval: float = 2.0):
-        self._min = min_interval
-        self._last = 0.0
-        self._lock = threading.Lock()
-
-    def wait(self):
-        with self._lock:
-            now = time.monotonic()
-            gap = self._min - (now - self._last)
-            if gap > 0:
-                time.sleep(gap)
-            self._last = time.monotonic()
-
-# 全局限流器实例（延迟模式时启用）
-_oj_limiter = RateLimiter(2.0)
-_ai_limiter = RateLimiter(2.0)
-_delay_mode = False
-_session_lock = threading.Lock()  # 共享 session 线程安全
-
 from oj_common import (load_dotenv, create_session, parse_contest_or_problem,
-                        parse_problem_url, fetch_user_id, oj_login, smart_login)
+                        parse_problem_url, fetch_user_id, smart_login,
+                        RateLimiter, push_oj_message)
 from config_manager import ConfigManager
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s.%(msecs)03d %(message)s", datefmt="%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
 
-_push_session = None
-_push_lock = threading.Lock()
+# 全局限流器实例（延迟模式时启用，复用 oj_common.RateLimiter）
+_oj_limiter = RateLimiter(2.0)
+_ai_limiter = RateLimiter(2.0)
+_delay_mode = False
+_session_lock = threading.Lock()  # 共享 session 线程安全
+_push_session = None  # main() 登录后设为共享主 session
 
 def _push(text: str, to_uid: int = 0, event: str = ""):
-    """推送消息。使用共享推送函数。线程安全。"""
-    global _push_session
+    """推送消息。复用主 session + oj_common 限速/403重试。线程安全。"""
     if event:
         try:
             pe = json.loads(os.environ.get("OJ_PUSH_EVENTS", "{}"))
             if not pe.get(event, True): return
         except Exception: pass
+    session = _push_session
+    if session is None:
+        return
     try:
-        from oj_common import create_session, smart_login, push_oj_message
-        with _push_lock:
-            if _push_session is None:
-                _push_session = create_session(verify_ssl=False)
-                root = os.environ.get("OJ_ROOT", "https://oj.yuanyicode.com")
-                if not smart_login(_push_session, root,
-                                os.environ.get("OJ_USERNAME",""),
-                                os.environ.get("OJ_PASSWORD","")):
-                    _push_session = None; return
         root = os.environ.get("OJ_ROOT", "https://oj.yuanyicode.com")
         requester = int(os.environ.get("OJ_REQUESTER", 0))
-        # 构建推送列表
         pids_raw = os.environ.get("OJ_PUSH_LIST", "")
         push_uids = [int(x.strip()) for x in pids_raw.split(",") if x.strip().isdigit()]
-        push_oj_message(_push_session, root, text,
+        push_oj_message(session, root, text,
                         push_uids=push_uids, requester=to_uid or requester)
     except Exception as e:
         log.debug("[!] push failed: %s", e)
@@ -166,6 +140,8 @@ def main():
     user_id = fetch_user_id(s, root)
     if not user_id: log.error("[-] 获取用户 ID 失败"); sys.exit(1)
     log.info("[+] 用户 ID: %d", user_id)
+    global _push_session
+    _push_session = s  # 复用主 session 推送
 
     # Cookie jar
     jar = str(Path(__file__).parent / ".oj_cookies_batch.json")

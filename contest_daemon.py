@@ -110,9 +110,19 @@ def check_contests(root: str, domains: list, processed: set,
     return pending
 
 
+# 推送事件（模块级状态，main() 初始化后供各线程使用）
+_msg_be = None
+_push_events = {}
+
 def _push_event(event: str, text: str):
-    """推送事件占位，main() 中替换为实际实现。模块级定义供 process_contest 使用。"""
-    pass
+    """推送事件到私信后端。_push_events 控制各事件开关（线程安全）。"""
+    be = _msg_be
+    if be is None or not _push_events.get(event, True):
+        return
+    try:
+        be.push(text)
+    except Exception as e:
+        log.debug("[!] push_event %s 异常: %s", event, e)
 
 def process_contest(contest: dict, solver_path: str, push_list: set = None) -> bool:
     url = contest["contest_url"]
@@ -210,11 +220,9 @@ def main():
     dash = Dashboard()
 
     push_events = c.msg_push_events
-    global _push_event
-    if msg_be and msg_push_list:
-        _push_event = lambda e, t: msg_be.push(t) if push_events.get(e, True) else None
-    else:
-        _push_event = lambda e, t: None
+    global _msg_be, _push_events
+    _push_events = push_events
+    _msg_be = msg_be if (msg_be and msg_push_list) else None
     # 将推送事件开关传给子进程
     os.environ["OJ_PUSH_EVENTS"] = json.dumps(push_events)
     _push_event("daemon_start", "守护进程已启动")

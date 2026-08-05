@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
-from oj_common import (load_dotenv, create_session, smart_login, load_config,
+from oj_common import (load_dotenv, create_session, smart_login,
                        parse_contest_or_problem, parse_problem_url)
 
 log = logging.getLogger("benchmark_solver")
@@ -29,7 +29,9 @@ class BenchmarkSolver:
         self.session = create_session(verify_ssl=False)
         self._oj_sem = threading.Semaphore(4)  # OJ 请求限流
         self._ai = None  # AIClient 延迟初始化（复用费用统计/429处理/客户端缓存）
-        cfg = load_config()
+        from config_manager import ConfigManager
+        cfg = ConfigManager()
+        self._cfg = cfg
         self.benchmark_users = set(str(x) for x in cfg.get("benchmark_users", [2]))
         self.processed = self._load_processed()
 
@@ -409,8 +411,7 @@ class BenchmarkSolver:
     def scan_all_contests(self, domains: list[str] = None):
         """扫描所有比赛的标程用户满分题（多线程并发处理）"""
         if domains is None:
-            cfg = load_config()
-            domains = cfg.get("monitor_domains", ["system", "yuanyi__contestForPrimary"])
+            domains = self._cfg.monitor_domains or ["system"]
         self._push_notify("benchmark_start", f"🔍 开始扫描标程用户: {', '.join(domains)}")
 
         # 收集所有待处理记录

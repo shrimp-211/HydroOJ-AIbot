@@ -16,7 +16,7 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
-from oj_common import (load_dotenv, create_session, smart_login, load_config,
+from oj_common import (load_dotenv, create_session, smart_login,
                        parse_contest_or_problem, parse_problem_url)
 
 log = logging.getLogger("testdata_supplement")
@@ -72,7 +72,7 @@ class TestDataSupplement:
 
     # ── 登录 ──
     def login(self) -> bool:
-        if oj_login(self.session, self.root, self.username, self.password):
+        if smart_login(self.session, self.root, self.username, self.password):
             log.info("[+] 登录成功"); return True
         log.error("[-] 登录失败"); return False
 
