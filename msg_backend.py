@@ -27,6 +27,14 @@ class MsgBackend:
         self.cmd_queue: queue.Queue = queue.Queue()
         self._running = False
         self._load_processed()
+        # 消息轮询高频且单次失败可快速重试，降低重试次数避免单次 fetch 卡死
+        try:
+            from requests.adapters import HTTPAdapter, Retry
+            low_retry = HTTPAdapter(max_retries=Retry(total=1))
+            self.s.mount("https://", low_retry)
+            self.s.mount("http://", low_retry)
+        except Exception:
+            pass
 
     def send(self, uid: int, text: str):
         try:
@@ -70,7 +78,7 @@ class MsgBackend:
     def fetch(self) -> list[dict]:
         try:
             r = self.s.get(f"{self.root}/home/messages",
-                           headers={"Accept": "application/json"}, timeout=15)
+                           headers={"Accept": "application/json"}, timeout=20)
             if r.status_code != 200: return []
             now = time.time()
             cutoff = now - 120
@@ -94,7 +102,7 @@ class MsgBackend:
             return msgs
         except Exception as e:
             log.warning("[消息] 获取异常: %s", e)
-            return []
+            raise  # 交给 start 捕获并快速重试，避免长时间错过消息
 
     def _handle(self, msg: dict):
         uid = msg.get("_udoc_id", 0)
@@ -124,9 +132,10 @@ class MsgBackend:
             try:
                 for msg in self.fetch():
                     self._handle(msg)
+                time.sleep(self.interval)
             except Exception as e:
-                log.warning("[消息] 轮询异常: %s", e)
-            time.sleep(self.interval)
+                log.warning("[消息] 获取失败，3s 后重试: %s", e)
+                time.sleep(3)  # 失败快速重试，不等待整个轮询间隔
 
     def start_async(self) -> threading.Thread:
         t = threading.Thread(target=self.start, daemon=True)
