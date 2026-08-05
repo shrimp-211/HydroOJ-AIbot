@@ -13,7 +13,7 @@ import requests
 from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
-from oj_common import load_dotenv, create_session, save_cookies, load_cookies, parse_problem_url, oj_login
+from oj_common import load_dotenv, create_session, save_cookies, load_cookies, parse_problem_url, oj_login, smart_login
 from config_manager import ConfigManager
 
 log = logging.getLogger(__name__)
@@ -212,9 +212,9 @@ class AIClient:
             result["code"] = result.get("code", "") or code
         return result
 
-    def _build_args(self, messages: list) -> dict:
+    def _build_args(self, messages: list, model: str = "") -> dict:
         """构建 API 请求参数（provider 自适应，每模型独立配置）"""
-        model = self.config["ai_model"]
+        model = model or self.config["ai_model"]
         base_url = self.config.get_model_base_url(model)
         max_tok = self.config.get_model_max_tokens(model)
         args = dict(model=model, messages=messages, max_tokens=max_tok)
@@ -231,9 +231,70 @@ class AIClient:
             args["extra_body"] = {"thinking": {"type": "enabled"}}
         return args
 
-    def _calc_cost(self, usage: dict) -> float:
+    @staticmethod
+    def _extract_usage(usage_obj) -> dict:
+        """从 OpenAI usage 对象提取统一 usage dict，兼容不同 SDK/API 字段名。"""
+        if not usage_obj:
+            return {}
+        def _get(u, *names):
+            for n in names:
+                obj = u
+                for part in n.split("."):
+                    obj = getattr(obj, part, None)
+                    if obj is None:
+                        break
+                if obj is not None and obj > 0:
+                    return obj
+            return 0
+        return {
+            "input": _get(usage_obj, "prompt_tokens", "input_tokens"),
+            "output": _get(usage_obj, "completion_tokens", "output_tokens"),
+            "total": _get(usage_obj, "total_tokens"),
+            "cache_hit": _get(usage_obj, "cache_creation_input_tokens",
+                              "prompt_tokens_details.cached_tokens"),
+        }
+
+    def chat(self, messages: list, model: str = "", use_stream: bool = False,
+             max_tokens: int = 0) -> dict | None:
+        """通用对话调用（模型参数化），供解题、标程解读等复用。
+
+        返回 {content, usage, cost, elapsed_s, model} 或 None。
+        复用 _build_args/_block_call/_calc_cost：含 429 处理、费用统计、客户端缓存。
+        """
+        if os.environ.get("OJ_DELAY_MODE") == "1":
+            _ai_delay()
+        model = model or self.config["ai_model"]
+        if self._get_client(model) is None:
+            log.error("[-] API Key 未配置"); return None
+        args = self._build_args(messages, model)
+        if max_tokens:
+            args["max_tokens"] = max_tokens
+        t_start = time.monotonic()
+        try:
+            content, _, usage_obj = (self._stream_call(args) if use_stream
+                                     else self._block_call(args))
+        except requests.RequestException as e:
+            log.error("[-] AI 网络异常: %s", e); return None
+        except Exception as e:
+            msg = str(e)
+            if "timed out" in msg.lower():
+                log.error("[-] AI 请求超时 — %s", self.config.get_model_base_url(model))
+            else:
+                log.error("[-] AI 调用异常: %s", e)
+            return None
+        if not content:
+            log.error("[-] AI 返回内容为空"); return None
+        usage = self._extract_usage(usage_obj)
+        cost = self._calc_cost(usage, model)
+        elapsed = time.monotonic() - t_start
+        log.info("[+] %s 耗时%.1fs | Token %di/%do | 费用¥%.4f",
+                 model, elapsed, usage.get("input", 0), usage.get("output", 0), cost)
+        return {"content": content, "usage": usage, "cost": cost,
+                "elapsed_s": elapsed, "model": model}
+
+    def _calc_cost(self, usage: dict, model: str = "") -> float:
         """根据模型定价计算费用（元），支持多峰值峰谷价"""
-        model = self.config["ai_model"]
+        model = model or self.config["ai_model"]
         pricing = self.config.get_model_pricing(model)
         if not pricing: return 0.0
         now = datetime.now().hour
@@ -275,27 +336,7 @@ class AIClient:
         blocks = list(re.finditer(rf"```(?:{ext}|c\+\+|c)\s*\n(.+?)```", content, re.DOTALL))
         if blocks:
             code = blocks[-1].group(1).strip()
-        usage = {}
-        if usage_obj:
-            # 兼容不同 SDK / API 的 usage 字段名
-            def _get(u, *names):
-                for n in names:
-                    # 支持点号分隔的递归属性访问 (如 prompt_tokens_details.cached_tokens)
-                    obj = u
-                    for part in n.split("."):
-                        obj = getattr(obj, part, None)
-                        if obj is None:
-                            break
-                    if obj is not None and obj > 0:
-                        return obj
-                return 0
-            usage = {
-                "input": _get(usage_obj, "prompt_tokens", "input_tokens"),
-                "output": _get(usage_obj, "completion_tokens", "output_tokens"),
-                "total": _get(usage_obj, "total_tokens"),
-                "cache_hit": _get(usage_obj, "cache_creation_input_tokens",
-                                  "prompt_tokens_details.cached_tokens"),
-            }
+        usage = self._extract_usage(usage_obj)
         cost = self._calc_cost(usage)
         elapsed = time.monotonic() - t_start
         log.info("[+] 耗时%.1fs | Token %di/%do | 费用¥%.4f | 内容%d字符 代码%d字符",
@@ -452,10 +493,9 @@ class OJClient:
         if not self.config["username"] or not self.config["password"]:
             log.error("[-] 未配置 OJ 凭据（检查 OJ_USERNAME/OJ_PASSWORD 环境变量或 config.json）")
             return False
-        if oj_login(self.session, self.root, self.config["username"],
-                     self.config["password"], max_retries):
-            jar_path = self.config.get("cookie_jar", "")
-            if jar_path: save_cookies(self.session, jar_path)
+        jar_path = self.config.get("cookie_jar", "") or ".oj_cookies.json"
+        if smart_login(self.session, self.root, self.config["username"],
+                     self.config["password"], jar_path):
             log.info("[+] 登录成功"); self.logged_in = True; return True
         log.error("[-] 登录失败"); return False
 

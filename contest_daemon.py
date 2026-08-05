@@ -16,7 +16,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import requests
 from oj_common import (load_dotenv, load_config, create_session, oj_login,
-                        parse_contest_or_problem, parse_problem_url)
+                        parse_contest_or_problem, parse_problem_url, smart_login)
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def check_contests(root: str, domains: list, processed: set,
                    username: str, password: str, include_ongoing: bool = True) -> list:
     session = create_session(verify_ssl=False)
     log.info("[*] 登录 %s ...", root)
-    if not oj_login(session, root, username, password):
+    if not smart_login(session, root, username, password):
         log.error("[-] 登录失败")
         _push_event("contest_login_fail", "比赛检查登录失败")
         return []
@@ -190,7 +190,7 @@ def main():
         from msg_backend import MsgBackend
         from oj_common import fetch_user_id
         msg_s = create_session(verify_ssl=False)
-        if not oj_login(msg_s, root, username, password):
+        if not smart_login(msg_s, root, username, password):
             log.error("[-] 消息后端登录失败")
         else:
             muid = fetch_user_id(msg_s, root) or 0

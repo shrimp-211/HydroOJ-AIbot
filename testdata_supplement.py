@@ -65,12 +65,9 @@ class TestDataSupplement:
     # ── AI 客户端（懒加载，避免重复创建）──
     def _get_ai_client(self):
         if self._ai_client is None:
-            from openai import OpenAI
-            cfg = load_config()
-            base_url = cfg.get("ai_base_url", "https://api.deepseek.com")
-            api_key = os.environ.get("AI_API_KEY", "")
-            self._ai_client = OpenAI(api_key=api_key, base_url=base_url,
-                                     timeout=300.0, max_retries=2)
+            from oj_solver import AIClient
+            from config_manager import ConfigManager
+            self._ai_client = AIClient(ConfigManager())
         return self._ai_client
 
     # ── 登录 ──
@@ -174,10 +171,9 @@ class TestDataSupplement:
             "```input3\n<输入3>\n```\n```output3\n<输出3>\n```\n"
             "仅输出样例，不要额外解释。"
         )
-        resp = client.chat.completions.create(
-            model=self.model, messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096)
-        content = resp.choices[0].message.content or ""
+        r = client.chat(messages=[{"role": "user", "content": prompt}],
+                        model=self.model, max_tokens=4096)
+        content = r["content"] if r else ""
 
         samples = self.extract_samples(content)
         if not samples:
@@ -271,13 +267,12 @@ class TestDataSupplement:
             "## 输出格式\n"
             "```cpp\n（完整代码）\n```"
         )
-        resp = client.chat.completions.create(
-            model=self.model,
+        r = client.chat(
             messages=[
                 {"role": "system", "content": "你是算法竞赛选手。输出正确无误的标准程序。"},
                 {"role": "user", "content": prompt},
-            ], max_tokens=16384)
-        code = resp.choices[0].message.content or ""
+            ], model=self.model, max_tokens=16384)
+        code = r["content"] if r else ""
 
         m = re.search(r'```(?:cpp|c\+\+)\s*\n(.+?)```', code, re.DOTALL)
         if m:
@@ -316,11 +311,9 @@ class TestDataSupplement:
             "```cpp 或 ```python\n（完整代码）\n```\n\n"
             "仅输出代码，不要解释。"
         )
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=16384)
-        code = resp.choices[0].message.content or ""
+        r = client.chat(messages=[{"role": "user", "content": prompt}],
+                        model=self.model, max_tokens=16384)
+        code = r["content"] if r else ""
         for lang in ["cpp", "c++", "python", "py"]:
             m = re.search(rf'```(?:{lang})\s*\n(.+?)```', code, re.DOTALL)
             if m:
@@ -537,11 +530,9 @@ class TestDataSupplement:
             "请修正代码，确保正确性。输出格式：\n"
             "```cpp\n（修正后的完整代码）\n```"
         )
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=16384)
-        code = resp.choices[0].message.content or ""
+        r = client.chat(messages=[{"role": "user", "content": prompt}],
+                        model=self.model, max_tokens=16384)
+        code = r["content"] if r else ""
         m = re.search(r'```(?:cpp|c\+\+)\s*\n(.+?)```', code, re.DOTALL)
         return m.group(1).strip() if m else None
 

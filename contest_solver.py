@@ -29,7 +29,7 @@ _delay_mode = False
 _session_lock = threading.Lock()  # 共享 session 线程安全
 
 from oj_common import (load_dotenv, create_session, parse_contest_or_problem,
-                        parse_problem_url, fetch_user_id, oj_login)
+                        parse_problem_url, fetch_user_id, oj_login, smart_login)
 from config_manager import ConfigManager
 
 load_dotenv()
@@ -48,12 +48,12 @@ def _push(text: str, to_uid: int = 0, event: str = ""):
             if not pe.get(event, True): return
         except Exception: pass
     try:
-        from oj_common import create_session, oj_login, push_oj_message
+        from oj_common import create_session, smart_login, push_oj_message
         with _push_lock:
             if _push_session is None:
                 _push_session = create_session(verify_ssl=False)
                 root = os.environ.get("OJ_ROOT", "https://oj.yuanyicode.com")
-                if not oj_login(_push_session, root,
+                if not smart_login(_push_session, root,
                                 os.environ.get("OJ_USERNAME",""),
                                 os.environ.get("OJ_PASSWORD","")):
                     _push_session = None; return
@@ -161,7 +161,7 @@ def main():
 
     s = create_session(verify_ssl=False)
     log.info("[*] 登录 OJ ...")
-    if not oj_login(s, root, username, password):
+    if not smart_login(s, root, username, password):
         log.error("[-] 登录失败"); sys.exit(1)
     user_id = fetch_user_id(s, root)
     if not user_id: log.error("[-] 获取用户 ID 失败"); sys.exit(1)
@@ -273,14 +273,14 @@ def main():
     log.info("[*] 已提交 %d 个任务，%d 线程并行处理中...", len(pending_tasks), args.workers)
     requester = int(os.environ.get("OJ_REQUESTER", 0))
     results = {}
+    # 全局统计（在 pending_tasks 块外初始化，避免全跳过时 UnboundLocalError）
+    total_tokens_in = total_tokens_out = total_cache = total_cost = total_elapsed = 0.0
+    model_stats = {}  # {model: {tokens_in, tokens_out, cache, cost, count, ac}}
     if requester:
         _push(f"共 {len(pending_tasks)} 题待处理")
 
     if pending_tasks:
         task_map = {t[0]: (t[1], t[2]) for t in pending_tasks}
-        # 全局统计
-        total_tokens_in = total_tokens_out = total_cache = total_cost = total_elapsed = 0.0
-        model_stats = {}  # {model: {tokens_in, tokens_out, cache, cost, count, ac}}
         for f in as_completed(task_map):
             pid, title = task_map[f]
             if title not in results:

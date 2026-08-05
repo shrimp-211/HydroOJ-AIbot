@@ -7,6 +7,7 @@ import os
 import re
 import json
 import time
+import threading
 import logging
 import requests
 from pathlib import Path
@@ -62,9 +63,47 @@ def setup_logging(quiet: bool = False, verbose: bool = False,
 # ═══════════════════════════════════════════════════════════════
 # 共享推送
 # ═══════════════════════════════════════════════════════════════
+class _MsgLimiter:
+    """进程级私信推送限速器 — 避免突发 POST 触发 OJ WAF 403。"""
+    def __init__(self, min_interval: float = 0.6):
+        self._min = min_interval
+        self._last = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            gap = self._min - (now - self._last)
+            if gap > 0:
+                time.sleep(gap)
+            self._last = time.monotonic()
+
+MSG_LIMITER = _MsgLimiter(0.6)
+
+_last_relogin = 0.0
+_relogin_lock = threading.Lock()
+
+
+def _recover_login(session, root: str):
+    """WAF 临时拦截（403）后重新登录。两次重登至少间隔 30s。"""
+    global _last_relogin
+    with _relogin_lock:
+        now = time.monotonic()
+        if now - _last_relogin < 30:
+            return
+        _last_relogin = now
+    try:
+        username = os.environ.get("OJ_USERNAME", "")
+        password = os.environ.get("OJ_PASSWORD", "")
+        if smart_login(session, root, username, password, ".oj_cookies.json"):
+            logging.getLogger(__name__).info("[*] 403 后重新登录成功")
+    except Exception:
+        pass
+
+
 def push_oj_message(session, root: str, text: str, push_uids: list[int] = None,
                     requester: int = 0):
-    """向 OJ 用户发送私信。线程安全（调用方负责 session 管理）。"""
+    """向 OJ 用户发送私信。限速 + 403 自动重新登录重试。"""
     import requests as _r
     targets = set()
     if requester > 0:
@@ -73,13 +112,32 @@ def push_oj_message(session, root: str, text: str, push_uids: list[int] = None,
         targets.update(push_uids)
     if not targets:
         return
+    _send_round(session, root, text, targets)
+    # 403 后重新登录并重试一轮
+    if _last_post_403:
+        logging.getLogger(__name__).warning("[!] 推送 403，重新登录后重试")
+        _recover_login(session, root)
+        _send_round(session, root, text, targets)
+
+
+_last_post_403 = False
+
+
+def _send_round(session, root: str, text: str, targets: set):
+    """发送一轮私信（带限速），记录是否出现 403。"""
+    global _last_post_403
+    MSG_LIMITER.wait()
+    got_403 = False
     for uid in targets:
         try:
-            session.post(f"{root}/home/messages",
-                         json={"operation": "send", "uid": uid, "content": text},
-                         headers={"Accept": "application/json"}, timeout=10)
-        except _r.RequestException:
+            r = session.post(f"{root}/home/messages",
+                             json={"operation": "send", "uid": uid, "content": text},
+                             headers={"Accept": "application/json"}, timeout=10)
+            if r.status_code == 403:
+                got_403 = True
+        except requests.RequestException:
             pass  # 推送失败不影响主流程
+    _last_post_403 = got_403
 
 
 # ═══════════════════════════════════════════════════════════════

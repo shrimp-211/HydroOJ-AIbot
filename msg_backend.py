@@ -30,6 +30,8 @@ class MsgBackend:
 
     def send(self, uid: int, text: str):
         try:
+            from oj_common import MSG_LIMITER
+            MSG_LIMITER.wait()
             self.s.post(f"{self.root}/home/messages",
                 json={"operation": "send", "uid": uid, "content": text},
                 headers={"Accept": "application/json"}, timeout=15)

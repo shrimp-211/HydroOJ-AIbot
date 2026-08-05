@@ -28,6 +28,7 @@ class BenchmarkSolver:
         self.model = model or DEFAULT_MODEL
         self.session = create_session(verify_ssl=False)
         self._oj_sem = threading.Semaphore(4)  # OJ 请求限流
+        self._ai = None  # AIClient 延迟初始化（复用费用统计/429处理/客户端缓存）
         cfg = load_config()
         self.benchmark_users = set(str(x) for x in cfg.get("benchmark_users", [2]))
         self.processed = self._load_processed()
@@ -180,23 +181,20 @@ class BenchmarkSolver:
         return False
 
     # ── AI 解读代码 ──
-    def interpret_code(self, problem: dict, code: str, author_uid: str) -> dict | None:
-        """用 AI 解读标程用户代码。"""
-        from openai import OpenAI
-        if os.environ.get("OJ_DELAY_MODE") == "1":
-            from oj_solver import _ai_delay
-            _ai_delay()
-        config = load_config()
-        base_url = config.get("ai_base_url", "https://api.deepseek.com")
-        api_key = os.environ.get("AI_API_KEY", "")
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0, max_retries=2)
+    def _get_ai(self):
+        if self._ai is None:
+            from oj_solver import AIClient
+            from config_manager import ConfigManager
+            self._ai = AIClient(ConfigManager())
+        return self._ai
 
+    def interpret_code(self, problem: dict, code: str, author_uid: str) -> dict | None:
+        """用 AI 解读标程用户代码。复用 AIClient（费用统计/429处理/客户端缓存）。"""
         tags = problem.get("tags", [])
         tags_str = ", ".join(tags) if tags else "无"
         limit_info = f"时限: {problem.get('time_limit', '?')} | 内存: {problem.get('memory_limit', '?')}"
 
         log.info("[*] AI 解读代码 (模型=%s) ...", self.model)
-        t_start = time.monotonic()
         prompt = (
             f"## 题目信息\n"
             f"- 标题: 【{problem.get('title', '?')}】\n"
@@ -214,54 +212,25 @@ class BenchmarkSolver:
             "## 技巧总结\n（这份代码值得学习的点）\n\n"
             "## 代码\n```cpp\n{完整代码}\n```"
         )
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": "你是算法讲师，擅长解读代码并讲解算法。"},
-                      {"role": "user", "content": prompt}],
-            max_tokens=16384)
-        elapsed = time.monotonic() - t_start
-        content = resp.choices[0].message.content or ""
-        if not content:
-            log.warning("[-] AI 返回空内容"); return None
+        r1 = self._get_ai().chat(
+            [{"role": "system", "content": "你是算法讲师，擅长解读代码并讲解算法。"},
+             {"role": "user", "content": prompt}],
+            model=self.model, max_tokens=16384)
+        if not r1:
+            log.warning("[-] AI 解读失败"); return None
+        content, usage, cost, elapsed = r1["content"], r1["usage"], r1["cost"], r1["elapsed_s"]
 
-        # 提取 token 用量
-        usage = {}
-        u = resp.usage
-        if u:
-            usage = {
-                "input": getattr(u, "prompt_tokens", 0),
-                "output": getattr(u, "completion_tokens", 0),
-                "total": getattr(u, "total_tokens", 0),
-            }
-
-        # 计算费用（从 models.{name}.pricing 读取，兼容旧 model_pricing）
-        cost = 0.0
-        try:
-            cfg = load_config()
-            models = cfg.get("models", {})
-            md = models.get(self.model, {})
-            pricing = md.get("pricing", {}) or cfg.get("model_pricing", {}).get(self.model, {})
-            if pricing:
-                inp = pricing.get("input", 0)
-                out = pricing.get("output", 0)
-                cost = (usage.get("input", 0) * inp + usage.get("output", 0) * out) / 1_000_000
-        except Exception:
-            pass
-
-        log.info("[+] AI 解读完成 (%d 字符, Token %.0fi/%.0fo, 耗时 %.1fs, ¥%.4f)",
-                 len(content), usage.get("input", 0), usage.get("output", 0),
-                 elapsed, cost)
         # 难度判断 + 标签筛选
         difficulty, tags = 3, []
         try:
             from model_router import ModelRouter
             diff_prompt = ModelRouter.DIFFICULTY_PROMPT.format(content=problem.get("content", "")[:3000])
-            diff_resp = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "system", "content": "输出难度和标签。"},
-                          {"role": "user", "content": diff_prompt}],
-                max_tokens=128)
-            difficulty, tags = ModelRouter.parse_diff_and_tags(diff_resp.choices[0].message.content or "")
+            r2 = self._get_ai().chat(
+                [{"role": "system", "content": "输出难度和标签。"},
+                 {"role": "user", "content": diff_prompt}],
+                model=self.model, max_tokens=128)
+            if r2:
+                difficulty, tags = ModelRouter.parse_diff_and_tags(r2["content"])
         except Exception:
             pass
         from model_router import ModelRouter
@@ -270,6 +239,9 @@ class BenchmarkSolver:
             header += "\n" + ModelRouter.tags_tag(tags)
         content = header + "\n\n" + content
 
+        log.info("[+] AI 解读完成 (%d 字符, Token %.0fi/%.0fo, 耗时 %.1fs, ¥%.4f)",
+                 len(content), usage.get("input", 0), usage.get("output", 0),
+                 elapsed, cost)
         return {"solution_md": content, "usage": usage, "cost": cost,
                 "elapsed_s": elapsed, "difficulty": difficulty}
 
