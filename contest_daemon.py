@@ -517,6 +517,13 @@ def main():
             log.warning("[!] 异常: %s，继续运行", e)
             _push_event("api_error", f"API异常: {str(e)[:80]}")
 
+    # 主循环退出（exit 指令 / Ctrl+C）：强制终止进程。
+    # run_check 的 ThreadPoolExecutor 工作线程为非 daemon，若其 worker
+    # 正卡在 contest_solver 子进程等待上，解释器退出会 join 等待 worker，
+    # 导致 exit 指令卡住数分钟。
+    log.info("[*] 守护进程退出")
+    os._exit(0)
+
 
 if __name__ == "__main__":
     main()
