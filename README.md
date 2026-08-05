@@ -15,7 +15,7 @@
 - **多模型独立配置**: 每模型可设独立 base_url、api_key、max_tokens、reasoning_effort、定价
 - **8 级难度系统**: 入门→普及−→普及/提高−→普及+/提高→提高→提高+/省选−→省选/NOI−→NOI/CTSC
 - **自动限流切换**: 429 限流时自动降级模型（free→flash, max→pro→flash）
-- **费用追踪**: 每模型独立定价（含峰谷价），单题费用上限（默认5元）
+- **费用追踪**: 每模型独立定价（含峰谷价），单题累计费用上限（默认5元，跨调用/跨比赛检测长期累计）
 
 ### 多域支持
 - 所有 OJ API 请求自动适配 system 和非 system 域
@@ -52,6 +52,9 @@ python oj_solver.py 1000  # 简写
 
 ```bash
 python contest_solver.py "https://your-oj-instance.com/d/system/contest/xxx"
+
+# 手动触发时可忽略单题金额累计（不检查累计上限）
+python contest_solver.py "https://.../contest/xxx" --no-accum
 ```
 
 ### 4. 启动守护进程
@@ -75,6 +78,7 @@ python contest_daemon.py --interval 120
   "msg_superuser": [2, 35],
   "benchmark_users": [2],
   "max_cost_per_problem": 5.0,
+  "cost_accum_enable": true,
   "auto_supplement_testdata": false,
   "model_router": {
     "tiers": { "flash": "...", "pro": "...", "max": "..." }
@@ -87,6 +91,20 @@ python contest_daemon.py --interval 120
   }
 }
 ```
+
+---
+
+## 单题费用累计
+
+`max_cost_per_problem`（默认 ¥5）按题目**长期累计**，持久化在 `cost_accum.json`（自动忽略）：
+
+- **自动求解**（比赛/守护进程批量）: 每次求解结束后把费用累加到该题，跨调用生效——同一题被不同比赛反复检测时，金额持续累计，不会重复重置
+- **达到上限后**立即停止后续 AI 调用，推送 💰 提示；该题被视为完成，不阻止比赛标记
+- **手动触发忽略累计**: 命令行 `oj_solver.py` 以及守护进程交互/私信触发的求解，不检查累计限额
+  - 手动批量可用 `contest_solver.py ... --no-accum` 显式忽略
+- **全局关闭**: `config.json` 设 `"cost_accum_enable": false`（此时仅按单次会话限额）
+
+> 注: 限额为软上限——最后一次 AI 调用在检查通过后执行，可能超额（超额幅度=单次调用费用）。
 
 ---
 

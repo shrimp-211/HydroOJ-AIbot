@@ -3,6 +3,7 @@
 __pycache__/
 *.tmp
 dashboard.json
+cost_accum.json
 benchmark_processed.json
 processed_contests.json
 .msg_processed.json

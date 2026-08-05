@@ -25,6 +25,17 @@ if sys.platform == "win32" and sys.stdout.isatty():
     try: sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     except Exception: pass
 
+
+def _script_dir() -> Path:
+    """脚本目录。兼容 __file__ 缺失的嵌入/面板运行环境（如 MCSManager exec 启动）。"""
+    f = globals().get("__file__")
+    if f:
+        return Path(f).resolve().parent
+    if sys.argv and sys.argv[0] and os.path.isfile(sys.argv[0]):
+        return Path(sys.argv[0]).resolve().parent
+    return Path.cwd()
+
+
 # ═══════════════════════════════════════════════════
 # 配置
 # ═══════════════════════════════════════════════════
@@ -182,7 +193,7 @@ def main():
     interval = args.interval or c.monitor_interval
 
     # 找 contest_solver.py
-    sp = Path(__file__).parent / "contest_solver.py"
+    sp = _script_dir() / "contest_solver.py"
     if not sp.exists(): sp = Path("contest_solver.py")
     if not sp.exists(): log.error("[-] 找不到 contest_solver.py"); sys.exit(1)
 
@@ -261,7 +272,7 @@ def main():
             # 标程扫描：处理完比赛后自动生成标程题解
             if processed:
                 log.info("[*] 自动标程题解扫描 ...")
-                sp_bm = str(Path(__file__).parent / "benchmark_solver.py")
+                sp_bm = str(_script_dir() / "benchmark_solver.py")
                 try:
                     subprocess.run([sys.executable, sp_bm],
                                    cwd=str(Path(sp_bm).parent),
@@ -381,7 +392,7 @@ def main():
         if parts[0].lower() == "td" and len(parts) >= 2:
             if not is_su: return "⛔ 仅超级管理员可用"
             url = parts[1] if parts[1].startswith("http") else f"{root}/d/system/p/{parts[1]}"
-            sp_td = str(Path(__file__).parent / "testdata_supplement.py")
+            sp_td = str(_script_dir() / "testdata_supplement.py")
             env2 = os.environ.copy()
             if reply_uid > 0:
                 env2["OJ_REQUESTER"] = str(reply_uid)
@@ -392,7 +403,7 @@ def main():
             return f"🔄 测试数据补充已启动: {url}"
 
         if parts[0].lower() == "bm":
-            sp_bm = str(Path(__file__).parent / "benchmark_solver.py")
+            sp_bm = str(_script_dir() / "benchmark_solver.py")
             target = parts[1] if len(parts) >= 2 else ""
             if target and not target.startswith("http"):
                 target = f"{root}/record/{target}" if re.match(r'^[a-f0-9]+$', target) else target
@@ -423,7 +434,7 @@ def main():
         try: info = parse_contest_or_problem(url)
         except ValueError: return "❌ 链接解析失败"
 
-        sp_one = str(Path(__file__).parent / "oj_solver.py")
+        sp_one = str(_script_dir() / "oj_solver.py")
         env = os.environ.copy()
         if reply_uid > 0:
             env["OJ_REQUESTER"] = str(reply_uid)
@@ -441,7 +452,8 @@ def main():
             cid = info.get("contest_id") or info.get("training_id", url.split('/')[-1][:20])
             title = info.get("title", cid)
             log.info("[*] 求解: %s", title)
-            subprocess.Popen([sys.executable, str(sp), url], cwd=str(Path(sp).parent), env=env)
+            subprocess.Popen([sys.executable, str(sp), url, "--no-accum"],
+                            cwd=str(Path(sp).parent), env=env)
             return f"🔄 {title} 已启动（{len(info.get('pids',[]))}题），完成后会自动回复结果"
 
     def _push_event_impl(text: str):

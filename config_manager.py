@@ -46,6 +46,7 @@ class AppConfig:
     benchmark_users: list[int] = field(default_factory=lambda: [2])
     auto_supplement_testdata: bool = False
     max_cost_per_problem: float = 5.0
+    cost_accum_enable: bool = True  # 单题金额长期累计（跨调用），False 则仅按单次会话限额
     msg_push_events: dict[str, bool] = field(default_factory=dict)
     code_obfuscate: dict[str, bool] = field(default_factory=dict)
 
@@ -123,6 +124,7 @@ class ConfigManager:
                     "benchmark_users": "benchmark_users",
                     "auto_supplement_testdata": "auto_supplement_testdata",
                     "max_cost_per_problem": "max_cost_per_problem",
+                    "cost_accum_enable": "cost_accum_enable",
                 }
                 for field, key in field_map.items():
                     if key in j and hasattr(c, field):

@@ -84,7 +84,7 @@ def _run_supplement(problem_url):
         log.warning("[!] 测试数据补充失败: %s", e)
 
 
-def solve_one(problem_url, cookie_jar, submit, contest_id=""):
+def solve_one(problem_url, cookie_jar, submit, contest_id="", accum=True):
     """求解单道题，返回 {pid, ok, score, is_ac, time_ms, tokens, cost, model, ...}"""
     from oj_solver import Config, OJClient, AIClient, SolverOrchestrator
     requester = int(os.environ.get("OJ_REQUESTER", 0))
@@ -95,7 +95,8 @@ def solve_one(problem_url, cookie_jar, submit, contest_id=""):
         config = Config(cli_overrides={"oj_root": root, "oj_base": api_base, "cookie_jar": cookie_jar})
         oj, ai = OJClient(config), AIClient(config)
         result = SolverOrchestrator(oj, ai, config).solve(
-            pid, submit=submit, post=submit, use_stream=False, contest_id=contest_id)
+            pid, submit=submit, post=submit, use_stream=False, contest_id=contest_id,
+            accumulate=accum)
         verdict = result.get("final_verdict") if result and isinstance(result, dict) else None
         usage = result.get("total_usage", {}) if result else {}
         return {
@@ -124,6 +125,7 @@ def main():
     parser.add_argument("--no-submit", action="store_true", help="跳过提交")
     parser.add_argument("--force", action="store_true", help="忽略已有题解")
     parser.add_argument("--workers", type=int, default=4, help="并发线程数（默认4）")
+    parser.add_argument("--no-accum", action="store_true", help="忽略单题金额累计（手动触发时使用）")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -185,7 +187,7 @@ def main():
                             _no_data_skips.append(pid)
                             continue
                     _push(f"🔄 #{pid} 开始", event="problem_start")
-                    f = pool.submit(solve_one, problem_url, jar, submit, "")
+                    f = pool.submit(solve_one, problem_url, jar, submit, "", not args.no_accum)
                     pending_tasks.append((f, pid, title))
             elif info["type"] == "training":
                 # 训练：/d/{domain}/training/{id} 或 /training/{id}（system 域）
@@ -211,7 +213,7 @@ def main():
                             _no_data_skips.append(pid)
                             continue
                     _push(f"🔄 #{pid} 开始", event="problem_start")
-                    f = pool.submit(solve_one, problem_url, jar, submit, "")
+                    f = pool.submit(solve_one, problem_url, jar, submit, "", not args.no_accum)
                     pending_tasks.append((f, pid, title))
             else:
                 # 比赛：先参加+获取pids，再提交任务
@@ -237,7 +239,7 @@ def main():
                             log.info("  #%s — 无测试数据，跳过（不标记比赛失败）", pid)
                             _no_data_skips.append(pid)
                             continue
-                    f = pool.submit(solve_one, problem_url, jar, submit, cid)
+                    f = pool.submit(solve_one, problem_url, jar, submit, cid, not args.no_accum)
                     pending_tasks.append((f, pid, title))
 
     # 延迟模式：>=20 题时开启，同服务请求至少间隔 2s

@@ -172,6 +172,63 @@ def append_dashboard_record(record: dict, path: str = "dashboard.json",
 
 
 # ═══════════════════════════════════════════════════════════════
+# 单题累计费用（跨调用/跨进程持久化，用于 max_cost_per_problem 长期限额）
+# ═══════════════════════════════════════════════════════════════
+_accum_path = "cost_accum.json"
+_accum_cache: dict | None = None
+_accum_lock = threading.Lock()
+
+
+def load_cost_accum() -> dict:
+    """读取单题累计费用 {pid: {"total": float, "updated": ts}}"""
+    global _accum_cache
+    with _accum_lock:
+        if _accum_cache is None:
+            try:
+                with open(_accum_path, "r", encoding="utf-8") as f:
+                    _accum_cache = json.load(f)
+            except (OSError, json.JSONDecodeError, TypeError):
+                _accum_cache = {}
+        return _accum_cache
+
+
+def accum_get(pid) -> float:
+    """读取某题累计费用"""
+    d = load_cost_accum()
+    try:
+        return float(d.get(str(pid), {}).get("total", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def accum_add(pid, cost: float) -> float:
+    """将 cost 累加到 pid 并原子写回，返回新累计值。线程安全。"""
+    global _accum_cache
+    with _accum_lock:  # 锁内直接操作缓存，避免重入（threading.Lock 不可重入）
+        if _accum_cache is None:
+            try:
+                with open(_accum_path, "r", encoding="utf-8") as f:
+                    _accum_cache = json.load(f)
+            except (OSError, json.JSONDecodeError, TypeError):
+                _accum_cache = {}
+        d = _accum_cache
+        try:
+            cur = float(d.get(str(pid), {}).get("total", 0.0))
+        except (TypeError, ValueError):
+            cur = 0.0
+        new = round(cur + cost, 4)
+        d[str(pid)] = {"total": new, "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
+        try:
+            tmp = _accum_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False)
+            os.replace(tmp, _accum_path)
+        except OSError:
+            pass  # 累计写入失败不影响主流程
+        return new
+
+
+# ═══════════════════════════════════════════════════════════════
 # .env 加载
 # ═══════════════════════════════════════════════════════════════
 def load_dotenv(env_path: str = ".env"):

@@ -13,7 +13,9 @@ import requests
 from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
-from oj_common import load_dotenv, create_session, save_cookies, load_cookies, parse_problem_url, oj_login, smart_login
+from oj_common import (load_dotenv, create_session, save_cookies, load_cookies,
+                        parse_problem_url, oj_login, smart_login,
+                        accum_get, accum_add)
 from config_manager import ConfigManager
 
 log = logging.getLogger(__name__)
@@ -792,7 +794,7 @@ class SolverOrchestrator:
 
     def solve(self, pid: str, *, submit: bool = True, post: bool = True,
               max_retries: int = 3, use_stream: bool = False, contest_id: str = "",
-              outer_retries: int = 3):
+              outer_retries: int = 3, accumulate: bool = True):
         """一键解题。
         Phase1: flash 快速尝试(不修正) → Phase2: 难度判断
         → Phase3: 三层循环 (外层升级模型 × 中层换思路2次 × 内层修正2次)
@@ -809,6 +811,8 @@ class SolverOrchestrator:
         code, solution_md = "", ""
         is_ac = False
         is_cost_capped = False  # 费用超上限
+        accum_enabled = accumulate and self.config.get("cost_accum_enable", True)
+        accum_base = accum_get(pid) if accum_enabled else 0.0  # 历史累计（不含本次会话）
         difficulty = 0  # 0=未判断, 1-8 (8级制)
         candidate_tags = []  # 初步筛选的候选标签（难度评定，供 AI 参考，不出现在题解中）
         final_tags = []      # AI 最终选定的标签（二次筛选，出现在题解中）
@@ -921,9 +925,9 @@ class SolverOrchestrator:
             for mid in range(mid_retries):
                 if is_ac: break
                 cost_cap = self.config.get("max_cost_per_problem", 5.0)
-                if total_cost >= cost_cap:
-                    log.warning("[-] 费用已达上限 ¥%.4f (cap=¥%.0f)，标记为费用超限",
-                                total_cost, cost_cap)
+                if accum_enabled and (accum_base + total_cost) >= cost_cap:
+                    log.warning("[-] 费用已达上限 ¥%.4f (累计¥%.4f+本次¥%.4f, cap=¥%.0f)，标记为费用超限",
+                                accum_base + total_cost, accum_base, total_cost, cost_cap)
                     is_cost_capped = True; break
                 route_thinking = tier.current_thinking(mid)
                 _apply_route()
@@ -985,9 +989,9 @@ class SolverOrchestrator:
                                     INNER_RETRIES, verdict["score"]); break
                     # 费用上限检查
                     cost_cap = self.config.get("max_cost_per_problem", 5.0)
-                    if total_cost >= cost_cap:
-                        log.warning("[-] 费用已达上限 ¥%.4f (cap=¥%.0f)，标记为费用超限",
-                                    total_cost, cost_cap)
+                    if accum_enabled and (accum_base + total_cost) >= cost_cap:
+                        log.warning("[-] 费用已达上限 ¥%.4f (累计¥%.4f+本次¥%.4f, cap=¥%.0f)，标记为费用超限",
+                                    accum_base + total_cost, accum_base, total_cost, cost_cap)
                         is_cost_capped = True; break
                     if verdict.get("is_system_error"):
                         log.warning("[!] 疑似评测机故障，直接重试提交")
@@ -1090,6 +1094,10 @@ class SolverOrchestrator:
 
         # 私信通知结果
         self._notify_solve_result(problem, is_ac, final_verdict, total_usage, total_cost)
+
+        # 单题累计费用写回（本次会话费用累加到历史）
+        if accum_enabled and total_cost > 0:
+            accum_add(pid, total_cost)
 
         return {"final_verdict": final_verdict, "psid": psid,
                 "retry_count": retry_count, "outer_count": retry_count,
@@ -1276,7 +1284,7 @@ def main():
         return
 
     solver.solve(args.pid, submit=not args.no_submit, post=not args.no_post,
-                  use_stream=args.stream)
+                  use_stream=args.stream, accumulate=False)
 
 
 if __name__ == "__main__":
