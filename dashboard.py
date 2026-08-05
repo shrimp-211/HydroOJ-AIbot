@@ -100,8 +100,8 @@ class Dashboard:
         """正在求解的题目。过滤掉历史中已完成的和超时的（>30min）。"""
         import time as _time
         with self._lock:
-            # 从 history 中提取已完成的 pid
-            done = {h["pid"] for h in self.history}
+            # 从 history 中提取已完成的 pid（contest 记录无 pid 字段，需跳过）
+            done = {h["pid"] for h in self.history if isinstance(h, dict) and "pid" in h}
             result = []
             for r in self.problems.values():
                 if r.status != "pending":

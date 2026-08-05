@@ -486,12 +486,16 @@ class OJClient:
                 log.warning("[!] Cookie 验证失败，重新登录")
                 self.logged_in = False
         log.info("[*] 登录 %s ...", self.root)
-        if not self.config["username"] or not self.config["password"]:
+        # 凭据优先级：环境变量（.env / 守护进程传递）> config.json。
+        # config.json 的 username 常为占位空值，必须回退环境变量，
+        # 否则 cookie 失效后子进程必然登录失败。
+        username = os.environ.get("OJ_USERNAME") or self.config.get("username", "")
+        password = os.environ.get("OJ_PASSWORD") or self.config.get("password", "")
+        if not username or not password:
             log.error("[-] 未配置 OJ 凭据（检查 OJ_USERNAME/OJ_PASSWORD 环境变量或 config.json）")
             return False
         jar_path = self.config.get("cookie_jar", "") or ".oj_cookies.json"
-        if smart_login(self.session, self.root, self.config["username"],
-                     self.config["password"], jar_path):
+        if smart_login(self.session, self.root, username, password, jar_path):
             log.info("[+] 登录成功"); self.logged_in = True; return True
         log.error("[-] 登录失败"); return False
 

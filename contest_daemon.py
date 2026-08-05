@@ -513,9 +513,17 @@ def main():
 
         except KeyboardInterrupt:
             log.info("\n[*] 退出"); break
-        except (requests.RequestException, subprocess.SubprocessError, OSError, ValueError) as e:
+        except Exception as e:
+            # 单条指令/交互异常不应杀死守护进程。之前的 except 只捕获
+            # 少数类型，stats/pending 等指令的 KeyError 会导致整个进程退出。
             log.warning("[!] 异常: %s，继续运行", e)
             _push_event("api_error", f"API异常: {str(e)[:80]}")
+            requester = locals().get("reply_uid", 0)
+            if requester and msg_be:
+                try:
+                    msg_be.send(requester, f"❌ 指令处理异常: {str(e)[:100]}")
+                except Exception:
+                    pass
 
     # 主循环退出（exit 指令 / Ctrl+C）：强制终止进程。
     # run_check 的 ThreadPoolExecutor 工作线程为非 daemon，若其 worker
