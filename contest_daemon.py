@@ -287,7 +287,20 @@ def main():
                     pass
 
     # 首次检查放在后台线程，避免阻塞交互
-    threading.Thread(target=run_check, daemon=True).start()
+    _checking = False
+    def _schedule_check():
+        nonlocal _checking
+        if _checking:
+            return
+        _checking = True
+        def _run_and_clear():
+            nonlocal _checking
+            try:
+                run_check()
+            finally:
+                _checking = False
+        threading.Thread(target=_run_and_clear, daemon=True).start()
+    _schedule_check()
     if args.once:
         # once 模式下等待检查完成
         time.sleep(5)
@@ -475,12 +488,12 @@ def main():
             ts = datetime.now().strftime("%m-%d %H:%M:%S")
             msg_be.push(f"[{ts}] {text}")
 
-    last_check = 0
+    last_check = time.time()
     while True:
         try:
             now = time.time()
             if now - last_check >= interval:
-                threading.Thread(target=run_check, daemon=True).start()
+                _schedule_check()
                 last_check = now
 
             # 统一读取：控制台 + 消息后端
