@@ -23,6 +23,9 @@ class AppConfig:
     ai_api_key: str = ""
     ai_reasoning_effort: str = "high"
     ai_max_tokens: int = 384000
+    # 多模态视觉模型（题面含图时优先使用，见 is_vision_model）
+    ai_vision_model: str = "deepseek-v4-flash-vision-exp"
+    max_problem_images: int = 4  # 每道题最多下载几张题面图片
     # Code
     lang: str = "cc.cc14o2"
     # Runtime
@@ -106,7 +109,9 @@ class ConfigManager:
                     "username": "username", "password": "password",
                     "ai_base_url": "ai_base_url", "ai_model": "ai_model",
                     "ai_api_key": "ai_api_key", "ai_reasoning_effort": "ai_reasoning_effort",
-                    "ai_max_tokens": "ai_max_tokens", "lang": "code_lang",
+                    "ai_max_tokens": "ai_max_tokens",
+                    "ai_vision_model": "ai_vision_model",
+                    "max_problem_images": "max_problem_images", "lang": "code_lang",
                     "verify_timeout": "verify_timeout",
                     "cookie_jar": "cookie_jar", "show_thinking": "show_thinking",
                     "monitor_domains": "monitor_domains",
@@ -181,6 +186,8 @@ class ConfigManager:
                 "ai_model": self._config.ai_model,
                 "ai_reasoning_effort": self._config.ai_reasoning_effort,
                 "ai_max_tokens": self._config.ai_max_tokens,
+                "ai_vision_model": self._config.ai_vision_model,
+                "max_problem_images": self._config.max_problem_images,
                 "code_lang": self._config.lang,
                 "username": self._config.username,
                 "password": self._config.password,
@@ -277,7 +284,9 @@ class ConfigManager:
             "username": "username", "password": "password",
             "ai_base_url": "ai_base_url", "ai_model": "ai_model",
             "ai_api_key": "ai_api_key", "ai_reasoning_effort": "ai_reasoning_effort",
-            "ai_max_tokens": "ai_max_tokens", "code_lang": "lang",
+            "ai_max_tokens": "ai_max_tokens",
+            "ai_vision_model": "ai_vision_model",
+            "max_problem_images": "max_problem_images", "code_lang": "lang",
             "verify_timeout": "verify_timeout",
             "cookie_jar": "cookie_jar", "show_thinking": "show_thinking",
             "monitor_domains": "monitor_domains",
@@ -391,6 +400,33 @@ class ConfigManager:
 
     def get_model_pricing(self, model_name: str) -> dict:
         return self.get_model_config(model_name)["pricing"]
+
+    def get_vision_model(self) -> str:
+        """多模态视觉模型名。配置 ai_vision_model 或按 models 段中标记 vision 的模型"""
+        name = self.cfg.ai_vision_model
+        if name:
+            return name
+        for mname, md in (self.cfg.models or {}).items():
+            if mname.startswith("_"):
+                continue
+            if md.get("vision"):
+                return mname
+        return ""
+
+    def is_vision_model(self, model_name: str) -> bool:
+        """模型是否支持多模态图片输入"""
+        name = model_name or self.cfg.ai_model
+        if not name:
+            return False
+        # 配置 ai_vision_model 显式指定
+        if name == self.cfg.ai_vision_model:
+            return True
+        # models 段显式标记 vision: true
+        md = (self.cfg.models or {}).get(name)
+        if md and md.get("vision"):
+            return True
+        # 命名约定回退：含 vision/视觉 的模型名
+        return "vision" in name.lower() or "glm-4.6v" in name.lower()
 
     def get_tier_model(self, tier: str) -> str | None:
         """获取路由层对应的模型名。优先 config.model_router.tiers，fallback 环境变量 AI_MODEL_<TIER>"""

@@ -6,6 +6,7 @@ import sys
 import re
 import json
 import time
+import base64
 import logging
 import threading
 import argparse
@@ -163,7 +164,9 @@ class AIClient:
             memory_limit=problem.get('memory_limit','?'), io_hint=io_hint, ext=ext)
         if candidate_tags:
             prompt += self._tag_prompt(candidate_tags)
-        return self._call_ai(prompt, sys_msg, use_stream)
+        # 题面图片：多模态模型优先携带（_call_ai 内部按模型能力过滤）
+        images = problem.get("images") or []
+        return self._call_ai(prompt, sys_msg, use_stream, images=images)
 
     def fix(self, problem: dict, code: str, solution_md: str,
             verdict: dict, retry_num: int = 1, use_stream: bool = False,
@@ -200,7 +203,8 @@ class AIClient:
         tpl = self._p("fix_with_history", DEFAULT_PROMPTS.get("fix_with_history", ""))
         fix_prompt = tpl.format(**fmt)
         return self._call_ai_with_messages(
-            history + [{"role": "user", "content": fix_prompt}], use_stream)
+            history + [{"role": "user", "content": fix_prompt}], use_stream,
+            images=problem.get("images") or [])
 
     def obfuscate(self, code: str) -> dict | None:
         """混淆代码：仅将代码发给 AI 要求强力混淆"""
@@ -350,7 +354,24 @@ class AIClient:
                 "usage": usage, "elapsed_s": elapsed, "cost": cost}
 
     # ---- 连续对话调用（复用 chat()，避免重复请求构建逻辑） ----
-    def _call_ai_with_messages(self, messages: list, use_stream: bool = False) -> dict | None:
+    def _call_ai_with_messages(self, messages: list, use_stream: bool = False,
+                               images: list | None = None) -> dict | None:
+        if images and self.config.is_vision_model(self.config["ai_model"]):
+            # 将图片追加到最近的 user 消息（图片仅允许出现在 user 消息）
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i]["role"] == "user":
+                    cur = messages[i]["content"]
+                    if isinstance(cur, str):
+                        content = [{"type": "text", "text": cur}]
+                    elif isinstance(cur, list):
+                        content = list(cur)
+                    else:
+                        break
+                    for img in images:
+                        if img:
+                            content.append({"type": "image_url", "image_url": {"url": img}})
+                    messages[i]["content"] = content
+                    break
         r = self.chat(messages, use_stream=use_stream)
         if not r:
             return None
@@ -360,16 +381,27 @@ class AIClient:
 
     # ---- 核心调用 ----
     def _call_ai(self, user_prompt: str, system_msg: str,
-                 use_stream: bool = False) -> dict | None:
+                 use_stream: bool = False, images: list | None = None) -> dict | None:
         if self._get_client() is None: log.error("[-] API Key 未配置"); return None
         # 延迟模式：同 AI 服务请求至少间隔 2s
         if os.environ.get("OJ_DELAY_MODE") == "1":
             _ai_delay()
         try:
-            log.info("[*] 提交AI (%d字符)", len(user_prompt))
+            log.info("[*] 提交AI (%d字符%s)", len(user_prompt),
+                     f", {len(images)}张图" if images else "")
             t_start = time.monotonic()
+            user_content: str | list = user_prompt
+            # 多模态：当前模型支持视觉且题面含图 → content 构造为块数组
+            model_now = self.config["ai_model"]
+            if images and self.config.is_vision_model(model_now):
+                blocks = [{"type": "text", "text": user_prompt}]
+                for img in images:
+                    if not img: continue
+                    blocks.append({"type": "image_url", "image_url": {"url": img}})
+                user_content = blocks
+                log.info("[多模态] 模型 %s 接收 %d 张图片", model_now, len(images))
             args = self._build_args([{"role": "system", "content": system_msg},
-                                     {"role": "user", "content": user_prompt}])
+                                     {"role": "user", "content": user_content}])
             content, reasoning, usage_obj = (self._stream_call(args) if use_stream
                                              else self._block_call(args))
             return self._parse_response(content, reasoning, usage_obj, t_start)
@@ -511,6 +543,8 @@ class OJClient:
             log.error("[-] 获取失败，状态码 %d", resp.status_code); return None
         data = resp.json(); pdoc = data.get("pdoc", {})
         content_raw = pdoc.get("content", ""); zh = ""
+        # 题面图片：从 HTML/Markdown 提取 <img> / ![]() 并下载为 base64 data URL
+        images = self._extract_images(content_raw, resp.url)
         if isinstance(content_raw, str):
             if content_raw.startswith("{"):
                 try: zh = json.loads(content_raw).get("zh", content_raw)
@@ -538,7 +572,8 @@ class OJClient:
                 "time_limit": time_limit or html_tags.get("time_limit", ""),
                 "memory_limit": memory_limit or html_tags.get("memory_limit", ""),
                 "io_method": html_tags.get("io_method", ""),
-                "url": f"{self.api_base}/p/{pid}"}
+                "url": f"{self.api_base}/p/{pid}",
+                "images": images}  # 题面图片 base64 data URL 列表（多模态模型使用）
 
     def _fetch_tags(self, pid: str) -> dict:
         """从网页 HTML 提取 problem__tags 中的有用信息。
@@ -564,6 +599,75 @@ class OJClient:
         except Exception:
             pass
         return result
+
+    # ---- 题面图片提取（多模态） ----
+    def _extract_images(self, content_raw, page_url: str = "") -> list[str]:
+        """从题面原始内容（HTML/Markdown）提取图片 URL，转绝对地址并下载为 base64。
+
+        返回 list[str]：每个元素是 data:image/xxx;base64,<data> 或失败时保留原 URL。
+        支持 <img src=...>、![alt](url)、[![alt](url)](link) 三类形式。
+        """
+        if isinstance(content_raw, dict):
+            content_raw = content_raw.get("zh", "")
+        if not isinstance(content_raw, str) or not content_raw:
+            return []
+        # 提取 <img src> 与 markdown 图片
+        srcs = []
+        for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', content_raw, re.I):
+            srcs.append(m.group(1))
+        for m in re.finditer(r'!\[[^\]]*\]\(([^)\s]+)', content_raw):
+            if not m.group(1).startswith("<"):  # 排除 HTML 实体
+                srcs.append(m.group(1))
+        if not srcs:
+            return []
+        # 去重并转绝对地址
+        seen, urls = set(), []
+        for s in srcs:
+            s = s.strip()
+            if s.startswith("data:"):  # 已内嵌 base64
+                urls.append(s); continue
+            abs_u = self._abs_url(s, page_url)
+            if abs_u and abs_u not in seen:
+                seen.add(abs_u); urls.append(abs_u)
+        if not urls:
+            return []
+        log.info("    [图片] 题面含 %d 张图: %s", len(urls), ", ".join(u[:60] for u in urls))
+        # 下载为 base64 data URL（限制大小，失败保留原 URL 供 vision 模型直接拉取）
+        max_images = int(self.config.get("max_problem_images", 4))
+        return self._download_images(urls[:max_images])
+
+    def _abs_url(self, url: str, page_url: str = "") -> str:
+        """相对/绝对 URL → 绝对 URL（基于题目页或 OJ 根）"""
+        if url.startswith("http://") or url.startswith("https://") or url.startswith("data:"):
+            return url
+        if url.startswith("//"):
+            return "https:" + url
+        base = page_url or f"{self.api_base}/p/"
+        # page_url 形如 https://host/d/domain/p/123，目录取到 /d/domain/ 便于相对路径
+        m = re.match(r'^(https?://[^/]+/d/[^/]+/)', base)
+        prefix = m.group(1) if m else (page_url or self.api_base)
+        return prefix.rstrip("/") + "/" + url.lstrip("/")
+
+    def _download_images(self, urls: list[str]) -> list[str]:
+        """下载图片为 base64 data URL。失败时保留原 URL（由 API 服务端抓取）。"""
+        results = []
+        for u in urls:
+            if u.startswith("data:"):
+                results.append(u); continue
+            try:
+                r = self.session.get(u, timeout=15)
+                if r.status_code == 200:
+                    ctype = r.headers.get("Content-Type", "image/png").split(";")[0]
+                    if ctype.startswith("image/"):
+                        b64 = base64.b64encode(r.content).decode()
+                        results.append(f"data:{ctype};base64,{b64}")
+                        log.info("    [图片] 下载成功 %s (%d bytes)", u, len(r.content))
+                        continue
+                log.warning("    [!] 图片下载失败 %d: %s", r.status_code, u)
+            except Exception as e:
+                log.warning("    [!] 图片下载异常 %s: %s", u, e)
+            results.append(u)  # 失败保留原 URL
+        return results
 
     # ---- 提交代码 ----
     def submit_code(self, pid: str, code: str, contest_id: str = "") -> str | None:
@@ -833,6 +937,12 @@ class SolverOrchestrator:
         route_model = router.default.model
         route_thinking = ""
 
+        # 题面含图 → 优先多模态视觉模型（纯文本模型无法理解图片）
+        has_image = bool(problem.get("images"))
+        vision_model = self.config.get_vision_model() if has_image else ""
+        if has_image and vision_model:
+            log.info("[多模态] 题面含 %d 张图，视觉模型 %s 可用", len(problem["images"]), vision_model)
+
         def _apply_route():
             self.config.set_override(ai_model=route_model)
             if route_thinking:
@@ -841,6 +951,10 @@ class SolverOrchestrator:
         # ═══ Phase 0: 免费模型快速尝试（不修正） ═══
         free_model = "glm-4.6v-flash"
         fallback_model = "deepseek-v4-flash"  # free 限流时切换到 flash
+        # 题面含图：free 尝试直接用视觉模型（优先 deepseek 多模态）
+        if has_image and vision_model:
+            free_model = vision_model
+            fallback_model = vision_model
         has_free = free_model in (self.config.cfg.models if self.config.cfg.models else {})
         if has_free:
             route_model = free_model
@@ -861,12 +975,14 @@ class SolverOrchestrator:
             memory_limit=problem.get('memory_limit','?'),
         io_hint=problem.get('io_method') and f"IO方式: {problem['io_method']}" or '使用标准输入输出',
         ext=ext)
-        result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream)
+        result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
+                                  images=problem.get("images") or [])
         # free 限流 → 自动切换 flash
         if result and result.get("_rate_limited"):
             log.info("[*] free 模型限流，切换 %s 重试", fallback_model)
             self.config.set_override(ai_model=fallback_model, ai_reasoning_effort="high")
-            result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream)
+            result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
+                                      images=problem.get("images") or [])
         if result and result.get("code"):
             code = result["code"]; solution_md = result["solution_md"]
             # 解析 AI 终选的标签
@@ -901,11 +1017,13 @@ class SolverOrchestrator:
             log.info("[路由] Phase1 难度判断 (模型=%s) ...",
                      free_model if has_free else self.config["ai_model"])
             diff_prompt = router.DIFFICULTY_PROMPT.format(content=problem.get("content","")[:3000])
-            diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。", use_stream=False)
+            diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。",
+                                           use_stream=False, images=problem.get("images") or [])
             if diff_result and diff_result.get("_rate_limited") and has_free:
                 log.info("[*] free 模型限流，切换 %s 判断难度", fallback_model)
                 self.config.set_override(ai_model=fallback_model, ai_reasoning_effort="high")
-                diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。", use_stream=False)
+                diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。",
+                                               use_stream=False, images=problem.get("images") or [])
             if diff_result:
                 difficulty, parsed_tags = ModelRouter.parse_diff_and_tags(diff_result.get("raw", ""))
                 if not candidate_tags:
@@ -926,7 +1044,12 @@ class SolverOrchestrator:
         for tier_idx in range(tier_start, len(router.tiers)):
             if is_ac: break
             tier = router.tiers[tier_idx]
-            route_model = tier.model
+            # 题面含图 → 所有层优先视觉模型（纯文本 pro/max 无法理解图片）
+            if has_image and vision_model:
+                route_model = vision_model
+                log.info("[多模态] 含图题目，层 %s 改用视觉模型 %s", tier.name, vision_model)
+            else:
+                route_model = tier.model
             # flash 层中层仅 1 次，其他层 2 次
             mid_retries = 1 if tier_idx == 0 else MID_RETRIES
 
@@ -945,9 +1068,18 @@ class SolverOrchestrator:
                 result = self.ai.generate(problem, use_stream=use_stream, difficulty=difficulty,
                                           candidate_tags=candidate_tags)
                 if result and result.get("_rate_limited"):
-                    # 降级模型: max→pro, pro→flash
+                    # 降级模型: max→pro, pro→flash；含图时保持视觉模型（降级也沿用 vision）
                     prev_tier = tier_idx - 1
-                    if prev_tier >= 0:
+                    if has_image and vision_model:
+                        log.warning("[!] %s 限流，含图题目保持视觉模型 %s 重试",
+                                    tier.name, vision_model)
+                        route_model = vision_model
+                        route_thinking = tier.current_thinking(mid)
+                        _apply_route()
+                        banner = self._code_banner()
+                        result = self.ai.generate(problem, use_stream=use_stream, difficulty=difficulty,
+                                          candidate_tags=candidate_tags)
+                    elif prev_tier >= 0:
                         fallback = router.tiers[prev_tier]
                         log.warning("[!] %s 限流，降级到 %s 重试", tier.name, fallback.model)
                         route_model = fallback.model

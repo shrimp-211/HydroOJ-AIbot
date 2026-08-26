@@ -117,6 +117,19 @@
         "output": 28.0,
         "cache_hit": 2.0
       }
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "_desc": "DeepSeek V4 Flash Vision Exp — 多模态视觉模型，支持图片输入（题面含图时优先使用）",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "DEEPSEEK_API_KEY",
+      "max_tokens": 384000,
+      "reasoning_effort": "high",
+      "vision": true,
+      "pricing": {
+        "input": 1.0,
+        "output": 2.0,
+        "cache_hit": 0.02
+      }
     }
   },
   "model_router": {
@@ -205,5 +218,7 @@
   "ai_api_key": "sk-e3ebf9f83db34558871951d95ca2c708",
   "benchmark_users": [
     2
-  ]
+  ],
+  "ai_vision_model": "deepseek-v4-flash-vision-exp",
+  "max_problem_images": 4
 }
