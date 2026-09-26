@@ -122,39 +122,11 @@ class TestDataSupplement:
         """从 markdown 提取样例输入输出。
         返回: [{"in": "...", "out": "...", "n": 1}, ...]
         """
-        samples = []
-        text = str(content)
-
-        # 方式1: ```inputN / ```outputN 格式（按编号匹配）
-        inputs = list(re.finditer(r'```input(\d*)\s*\n(.+?)```', text, re.DOTALL))
-        outputs = list(re.finditer(r'```output(\d*)\s*\n(.+?)```', text, re.DOTALL))
-
-        if inputs and outputs:
-            in_map = {m.group(1) or "0": m.group(2).strip() for m in inputs}
-            out_map = {m.group(1) or "0": m.group(2).strip() for m in outputs}
-            common = set(in_map.keys()) & set(out_map.keys())
-            for i, k in enumerate(sorted(common)):
-                samples.append({"in": in_map[k], "out": out_map[k], "n": i + 1})
-            if samples:
-                log.info("[+] 提取 %d 组结构化样例", len(samples))
-                return samples
-
-        # 方式2: 连续 ```input / ```output 交错（验证配对）
-        blocks = list(re.finditer(r'```(input|output)\d*\s*\n(.+?)```', text, re.DOTALL))
-        i = 0
-        while i < len(blocks) - 1:
-            b1, b2 = blocks[i], blocks[i + 1]
-            if "input" in b1.group(1) and "output" in b2.group(1):
-                samples.append({
-                    "in": b1.group(2).strip(),
-                    "out": b2.group(2).strip(),
-                    "n": len(samples) + 1,
-                })
-                i += 2
-            else:
-                i += 1
+        # 统一委托给 oj_samples（求解前的本地自测用同一套解析）
+        from oj_samples import extract_samples as _extract
+        samples = _extract(content)
         if samples:
-            log.info("[+] 提取 %d 组连续样例", len(samples))
+            log.info("[+] 提取 %d 组样例", len(samples))
         return samples
 
     # ── Phase 2b: AI 生成样例 ──────────────────────────

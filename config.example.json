@@ -224,5 +224,19 @@
   "difficulty_detect_enable": true,
   "_difficulty_detect_enable": "是否调用 AI 判断题目难度并据此选择模型层级。false=跳过这次调用，改用 difficulty_skip_model（可用 --no-difficulty-detect 临时关闭）",
   "difficulty_skip_model": "",
-  "_difficulty_skip_model": "关闭难度判断时使用的模型名（须与 models 段 key 一致）。留空=沿用 model_router 的首个层级；填了 model_router 分层中的模型则从该层开始（保留升级顺序），填其它模型则本次只使用该模型"
+  "_difficulty_skip_model": "关闭难度判断时使用的模型名（须与 models 段 key 一致）。留空=沿用 model_router 的首个层级；填了 model_router 分层中的模型则从该层开始（保留升级顺序），填其它模型则本次只使用该模型",
+  "agent_enabled": true,
+  "_agent_enabled": "启用 agent 求解：先本地编译 → 跑题面样例 → 用暴力解随机对拍，全部通过才提交 OJ。需要本机有 g++（C++）或 python3；检测不到工具链时自动回退到原三层循环",
+  "agent_max_steps": 6,
+  "_agent_max_steps": "单题最多几轮「出方案 → 写代码 → 看反馈修正」",
+  "agent_max_submissions": 4,
+  "_agent_max_submissions": "单题最多提交几次（本地验证拦下的不计入）",
+  "agent_max_seconds": 900,
+  "_agent_max_seconds": "单题 agent 求解总时长上限（秒）",
+  "agent_stress_enable": true,
+  "_agent_stress_enable": "是否让模型额外给出暴力解与随机数据生成器，在本地对拍（self-hack）。false 时仍会做编译与样例检查",
+  "agent_stress_rounds": 30,
+  "_agent_stress_rounds": "对拍轮数，出现反例立即停止并回喂给模型",
+  "agent_run_timeout": 10,
+  "_agent_run_timeout": "单次本地运行超时（秒），实际会按题目时限自动收紧"
 }

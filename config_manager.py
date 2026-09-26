@@ -31,6 +31,14 @@ FIELD_TO_JSON = {
     # 难度判断开关（关闭时不调用难度评估模型，直接使用 difficulty_skip_model）
     "difficulty_detect_enable": "difficulty_detect_enable",
     "difficulty_skip_model": "difficulty_skip_model",
+    # Agent 求解（本地编译/样例/对拍后才提交）
+    "agent_enabled": "agent_enabled",
+    "agent_max_steps": "agent_max_steps",
+    "agent_max_submissions": "agent_max_submissions",
+    "agent_max_seconds": "agent_max_seconds",
+    "agent_stress_enable": "agent_stress_enable",
+    "agent_stress_rounds": "agent_stress_rounds",
+    "agent_run_timeout": "agent_run_timeout",
     # 代码 / 运行时
     "lang": "code_lang",
     "verify_timeout": "verify_timeout",
@@ -79,6 +87,14 @@ class AppConfig:
     # 难度判断：关闭后跳过难度评估调用（省一次 AI 请求），改用 difficulty_skip_model
     difficulty_detect_enable: bool = True
     difficulty_skip_model: str = ""  # 关闭难度判断时使用的模型（空=沿用分层默认）
+    # Agent 求解：先本地编译/跑样例/随机对拍，通过后再提交 OJ
+    agent_enabled: bool = True
+    agent_max_steps: int = 6           # 单题最多几轮「方案 → 实现 → 修正」
+    agent_max_submissions: int = 4     # 单题最多提交几次
+    agent_max_seconds: int = 900       # 单题 agent 总时长上限（秒）
+    agent_stress_enable: bool = True   # 是否用暴力解做随机对拍
+    agent_stress_rounds: int = 30      # 对拍轮数
+    agent_run_timeout: int = 10        # 单次本地运行超时（秒）
     # Code
     lang: str = "cc.cc14o2"
     # Runtime
@@ -230,6 +246,9 @@ class ConfigManager:
                 "cookie_jar": ["OJ_COOKIE_JAR"],
                 "difficulty_detect_enable": ["OJ_DIFFICULTY_DETECT", "DIFFICULTY_DETECT"],
                 "difficulty_skip_model": ["OJ_DIFFICULTY_SKIP_MODEL", "DIFFICULTY_SKIP_MODEL"],
+                "agent_enabled": ["OJ_AGENT_ENABLE", "AGENT_ENABLE"],
+                "agent_max_steps": ["OJ_AGENT_MAX_STEPS"],
+                "agent_stress_enable": ["OJ_AGENT_STRESS", "AGENT_STRESS"],
                 "lang": ["OJ_LANG"],
                 "verify_timeout": ["OJ_VERIFY_TIMEOUT", "VERIFY_TIMEOUT"],
             }

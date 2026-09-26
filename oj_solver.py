@@ -41,6 +41,86 @@ DEFAULT_PROMPTS = {
     "generate_flash": "【{title}】{info}\n{content}\n\n---\n请给出正确解法。时限 {time_limit}，内存 {memory_limit}，{io_hint}\n\n## 解题思路\n（简短）\n\n## 代码\n```{ext}\n（完整代码）\n```",
 
     "generate_hard": "【{title}】{info}\n{content}\n\n---\n困难题，请深入讲解。时限 {time_limit}，内存 {memory_limit}，{io_hint}\n\n## 解题思路\n（问题转化 → 算法对比 → 推导证明 → 边界清单 → 实现要点 → 复杂度）\n\n## 代码\n```{ext}\n（完整代码）\n```",
+
+    # ── Agent 求解循环用的提示词（分析 → 实现 → 修正 → 对拍素材）──
+    "agent_system": "你是算法竞赛选手。你的产出会被自动编译、跑样例、随机对拍，只有本地验证通过的代码才会提交评测。\n\n## 铁律\n- 代码必须是完整可编译的程序（含必要的头文件与 main 函数）\n- 读入方式按题面要求：默认标准输入输出，注明文件 IO 时必须按要求读写文件\n- 使用 long long 处理可能超过 2e9 的整数；数组大小 = 最大数据量 + 5\n- 多组数据时重置全局/静态变量；大输入加 ios::sync_with_stdio(false); cin.tie(nullptr);\n- 先保证正确，再考虑优化；不确定的边界（n=0/1、极值、相同元素、退化图）必须显式处理\n- 输出格式严格按题面（多余空格、缺换行都会判错）",
+    "agent_plan": """先分析题目，给出解题方案，不要写代码。
+
+## 题目
+{title}
+
+{content}
+
+时限 {time_limit}，内存 {memory_limit}
+
+## 输出格式
+1. **问题本质**：一句话说明这题在求什么
+2. **算法**：选定算法 + 为什么它能过（与备选方案对比）
+3. **关键推导/不变量**：写清正确性依据
+4. **复杂度**：时间/空间，与限制比较
+5. **边界清单**：需要显式处理的情况（逐条列出）""",
+    "agent_implement": """按方案写出完整代码。
+
+## 题目
+{title}
+
+{content}
+
+时限 {time_limit}，内存 {memory_limit}
+
+## 方案
+{plan}
+
+## 要求
+- 严格按上述方案实现，逐个处理边界清单
+- 只输出一个代码块（```{ext} ... ```），外加不超过 3 行的要点说明
+- 写完后在脑中用样例验证一遍，确认输出格式正确""",
+    "agent_repair": """上一份代码没通过验证，请修正。**不要重复已经失败的思路**。
+
+## 题目
+{title}
+
+{content}
+
+## 原方案
+{plan}
+
+## 当前代码
+```{ext}
+{code}
+```
+
+{feedback}
+
+## 已尝试过（避免重复）
+{journal}
+
+## 修正要求
+1. 先根据反馈定位**确切原因**（编译错误看报错行；样例 WA 看 diff；对拍失败看反例）
+2. 如果是思路本身错了 → 换算法并说明，不要在原思路上打补丁
+3. 输出完整的新代码（```{ext} ... ```），不要只给片段
+4. 最后用反例/样例自检一遍""",
+    "agent_reference": """为下面的题目提供**暴力解**和**随机数据生成器**，用于对拍验证。
+
+## 题目
+{title}
+
+{content}
+
+## 要求
+- 暴力解：正确性优先，允许指数级/平方级复杂度，只需能处理很小的数据（n ≤ 10 量级）
+- 数据生成器：从标准输入读入轮次编号（随机种子），向标准输出打印一组**合法且规模很小**的随机数据
+  - 多个数/多行时用空格或换行分隔，格式必须与题面输入格式完全一致
+  - 有时用种子初始化随机数，保证不同轮次数据不同
+- 两者都只依赖标准输入输出，不读文件
+
+## 输出格式（严格，两个代码块）
+```brute
+（暴力解完整代码）
+```
+```gen
+（数据生成器完整代码）
+```""",
 }
 
 
@@ -1049,6 +1129,10 @@ class SolverOrchestrator:
         if has_image and vision_model:
             log.info("[多模态] 题面含 %d 张图，视觉模型 %s 可用", len(problem["images"]), vision_model)
 
+        # ═══ Agent 模式：本地编译 + 样例 + 对拍后再提交 ═══
+        agent = self._build_agent(pid, contest_id, accum_enabled, accum_base,
+                                  lambda: total_cost)
+
         # ═══ Phase 0: 免费模型快速尝试（不修正） ═══
         free_model = "glm-4.6v-flash"
         fallback_model = "deepseek-v4-flash"  # free 限流时切换到 flash
@@ -1064,53 +1148,56 @@ class SolverOrchestrator:
         log.debug("[路由] free_model=%s fallback=%s has_free=%s",
                   free_model, fallback_model, has_free)
 
-        # flash 专属提示词：快速、直击核心
-        tpl = self.ai._p("generate_flash", "") or DEFAULT_PROMPTS.get("generate_flash", "")
-        if not tpl:
-            tpl = self.ai._p("generate_easy", "") or DEFAULT_PROMPTS.get("generate_easy", "")
-        ext = self.ai.config.lang_ext
-        prompt = tpl.format(title=problem['title'],
-            info=f"时限 {problem.get('time_limit','?')} | 内存 {problem.get('memory_limit','?')}",
-            content=problem['content'], time_limit=problem.get('time_limit','?'),
-            memory_limit=problem.get('memory_limit','?'),
-        io_hint=problem.get('io_method') and f"IO方式: {problem['io_method']}" or '使用标准输入输出',
-        ext=ext)
-        result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
-                                  images=problem.get("images") or [],
-                                  model=route_model, effort=route_thinking)
-        # free 限流 → 自动切换 flash
-        if result and result.get("_rate_limited"):
-            log.info("[*] free 模型限流，切换 %s 重试", fallback_model)
-            route_model, route_thinking = fallback_model, "high"
+        # agent 模式下跳过这次「盲提交」：本地验证会把同类问题挡在前面，
+        # 白交一份代码只会浪费提交次数与评测时间。
+        if agent is None:
+            # flash 专属提示词：快速、直击核心
+            tpl = self.ai._p("generate_flash", "") or DEFAULT_PROMPTS.get("generate_flash", "")
+            if not tpl:
+                tpl = self.ai._p("generate_easy", "") or DEFAULT_PROMPTS.get("generate_easy", "")
+            ext = self.ai.config.lang_ext
+            prompt = tpl.format(title=problem['title'],
+                info=f"时限 {problem.get('time_limit','?')} | 内存 {problem.get('memory_limit','?')}",
+                content=problem['content'], time_limit=problem.get('time_limit','?'),
+                memory_limit=problem.get('memory_limit','?'),
+            io_hint=problem.get('io_method') and f"IO方式: {problem['io_method']}" or '使用标准输入输出',
+            ext=ext)
             result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
                                       images=problem.get("images") or [],
                                       model=route_model, effort=route_thinking)
-        if result and result.get("code"):
-            code = result["code"]; solution_md = result["solution_md"]
-            # 解析 AI 终选的标签
-            parsed_tags, solution_md = _extract_tag_prefix(solution_md)
-            if parsed_tags:
-                candidate_tags = parsed_tags
-            fu = result.get("usage", {})
-            for k in ("input", "output", "total", "cache_hit"):
-                total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
-            total_elapsed += result.get("elapsed_s", 0)
-            total_cost += result.get("cost", 0)
-            used_model = result.get("model", route_model)
-            used_effort = route_thinking
-            banner = self._code_banner_for(used_model, usage=fu,
-                                           cost=result.get("cost", 0), effort=used_effort)
-            if submit:
-                rid = self.oj.submit_code(pid, banner + code)
-                all_rids.append(rid)
-                if rid:
-                    verdict = self.oj.verify_submission(rid)
-                    all_verdicts.append(verdict)
-                    final_verdict = verdict
-                    if verdict and verdict.get("is_ac"):
-                        is_ac = True
-                        log.info("[+] Phase0 AC! 用时 %.0fms, 内存 %.0fKB",
-                                 verdict["time_ms"], verdict["memory_kb"])
+            # free 限流 → 自动切换 flash
+            if result and result.get("_rate_limited"):
+                log.info("[*] free 模型限流，切换 %s 重试", fallback_model)
+                route_model, route_thinking = fallback_model, "high"
+                result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
+                                          images=problem.get("images") or [],
+                                          model=route_model, effort=route_thinking)
+            if result and result.get("code"):
+                code = result["code"]; solution_md = result["solution_md"]
+                # 解析 AI 终选的标签
+                parsed_tags, solution_md = _extract_tag_prefix(solution_md)
+                if parsed_tags:
+                    candidate_tags = parsed_tags
+                fu = result.get("usage", {})
+                for k in ("input", "output", "total", "cache_hit"):
+                    total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
+                total_elapsed += result.get("elapsed_s", 0)
+                total_cost += result.get("cost", 0)
+                used_model = result.get("model", route_model)
+                used_effort = route_thinking
+                banner = self._code_banner_for(used_model, usage=fu,
+                                               cost=result.get("cost", 0), effort=used_effort)
+                if submit:
+                    rid = self.oj.submit_code(pid, banner + code)
+                    all_rids.append(rid)
+                    if rid:
+                        verdict = self.oj.verify_submission(rid)
+                        all_verdicts.append(verdict)
+                        final_verdict = verdict
+                        if verdict and verdict.get("is_ac"):
+                            is_ac = True
+                            log.info("[+] Phase0 AC! 用时 %.0fms, 内存 %.0fKB",
+                                     verdict["time_ms"], verdict["memory_kb"])
 
         # ═══ Phase 1: 难度判断（可用 difficulty_detect_enable 关闭） ═══
         detect_enabled = bool(self.config.get("difficulty_detect_enable", True))
@@ -1170,8 +1257,13 @@ class SolverOrchestrator:
                 log.info("[多模态] 含图题目，层 %s 改用视觉模型 %s", tier.name, vision_model)
             else:
                 route_model = tier.model
-            # flash 层（索引 0）中层仅 1 次，其他层 2 次；专用模型层按 2 次
-            mid_retries = 1 if (tier_idx == 0 and custom_tier is None) else MID_RETRIES
+            # flash 层（索引 0）中层仅 1 次，其他层 2 次；专用模型层按 2 次。
+            # agent 模式自带「实现→本地验证→修正」的内循环，每层只跑一轮，
+            # 避免外层层级与内层步数相乘导致费用失控。
+            if agent is not None:
+                mid_retries = 1
+            else:
+                mid_retries = 1 if (tier_idx == 0 and custom_tier is None) else MID_RETRIES
 
             for mid in range(mid_retries):
                 if is_ac: break
@@ -1180,6 +1272,37 @@ class SolverOrchestrator:
                 route_thinking = tier.current_thinking(mid)
                 log.info("[三层] 模型=%s 中层=%d/%d 难度=%d",
                          route_model, mid + 1, mid_retries, difficulty)
+
+                # ── agent 分支：方案 → 实现 → 本地编译/样例/对拍 → 提交 ──
+                if agent is not None:
+                    outcome = agent.attempt(
+                        problem, model=route_model, effort=route_thinking,
+                        difficulty=difficulty, candidate_tags=candidate_tags,
+                        submit=submit, use_stream=use_stream, contest_id=contest_id)
+                    for k in ("input", "output", "total", "cache_hit"):
+                        total_usage[k] = total_usage.get(k, 0) + outcome.usage.get(k, 0)
+                    total_cost += outcome.cost
+                    total_elapsed += outcome.elapsed
+                    all_rids.extend(outcome.rids)
+                    all_verdicts.extend(outcome.verdicts)
+                    if outcome.verdict:
+                        final_verdict = outcome.verdict
+                    if outcome.code:
+                        code = outcome.code
+                        solution_md = outcome.solution_md
+                        parsed_tags, solution_md = _extract_tag_prefix(solution_md)
+                        if parsed_tags:
+                            final_tags = parsed_tags
+                        used_model, used_effort = outcome.model, outcome.effort
+                        banner = self._code_banner_for(used_model, usage=outcome.usage,
+                                                       cost=outcome.cost, effort=used_effort)
+                    if outcome.is_ac:
+                        is_ac = True
+                        break
+                    if outcome.is_cost_capped:
+                        is_cost_capped = True
+                        break
+                    continue
 
                 result = self.ai.generate(problem, use_stream=use_stream, difficulty=difficulty,
                                           candidate_tags=candidate_tags,
@@ -1364,6 +1487,44 @@ class SolverOrchestrator:
                 "model": used_model,
                 "is_cost_capped": is_cost_capped}
 
+    def _build_agent(self, pid: str, contest_id: str, accum_enabled: bool,
+                     accum_base: float, session_cost):
+        """按配置装配 agent 求解器；不可用时返回 None（走原三层循环）。
+
+        agent 的核心是「本地工具」：编译、跑样例、随机对拍。缺少工具链
+        （例如没装 g++）时不做任何降级猜测，直接回到原来的流程。
+        """
+        if not self.config.get("agent_enabled", True):
+            log.info("[Agent] 配置已关闭（agent_enabled=false），使用原三层循环")
+            return None
+        try:
+            from local_judge import LocalJudge
+            from solver_agent import SolverAgent
+        except ImportError as e:                       # 模块缺失时不影响求解
+            log.warning("[Agent] 模块加载失败: %s", e)
+            return None
+        try:
+            judge = LocalJudge(self.config.lang_ext,
+                               # 带 pid 后缀：多个进程同时解同一道题时互不覆盖编译产物
+                               workdir=os.path.join("agent_work", f"p{pid}_{os.getpid()}"),
+                               run_timeout=self.config.get("agent_run_timeout", 10) or 10)
+        except Exception as e:
+            log.warning("[Agent] 本地评测器初始化失败: %s", e)
+            return None
+        if not judge.available:
+            log.warning("[Agent] 未检测到 %s 本地工具链，回退原三层循环"
+                        "（安装 g++ 后自动启用本地验证）", self.config.lang_ext)
+            return None
+        log.info("[Agent] 本地验证已启用 | %s", judge.describe())
+        return SolverAgent(
+            self.ai, self.config, judge,
+            submit_fn=lambda code: self.oj.submit_code(pid, code, contest_id=contest_id),
+            judge_fn=self.oj.verify_submission,
+            banner_fn=lambda model, effort, usage, cost: self._code_banner_for(
+                model, usage=usage, cost=cost, effort=effort),
+            cost_exceeded=lambda: self._is_cost_capped(
+                accum_enabled, accum_base, session_cost()))
+
     def _is_cost_capped(self, enabled: bool, accum_base: float, session_cost: float) -> bool:
         """单题费用是否已达上限（累计历史 + 本次会话）。
 
@@ -1530,6 +1691,12 @@ def build_cli_overrides(args, parsed_root: str = "", parsed_api_base: str = "") 
         cli["difficulty_detect_enable"] = False
     if getattr(args, "no_difficulty_detect", False):
         cli["difficulty_detect_enable"] = False
+    if getattr(args, "no_agent", False):
+        cli["agent_enabled"] = False
+    if getattr(args, "agent_steps", None):
+        cli["agent_max_steps"] = args.agent_steps
+    if getattr(args, "no_stress", False):
+        cli["agent_stress_enable"] = False
     cli["show_thinking"] = bool(getattr(args, "show_thinking", False))
     return cli
 
@@ -1556,6 +1723,12 @@ def main():
                         help="跳过难度判断（少一次 AI 调用），配合 --difficulty-skip-model 指定所用模型")
     parser.add_argument("--difficulty-skip-model", metavar="MODEL",
                         help="关闭难度判断时使用的模型（默认沿用分层首个模型）")
+    parser.add_argument("--no-agent", action="store_true",
+                        help="关闭 agent 求解（不做本地编译/样例/对拍，直接提交）")
+    parser.add_argument("--agent-steps", type=int, metavar="N",
+                        help="agent 模式下单题最多几轮生成/修正（默认 6）")
+    parser.add_argument("--no-stress", action="store_true",
+                        help="agent 模式下跳随机对拍（仍做本地编译与样例检查）")
     parser.add_argument("--show-thinking", action="store_true", help="显示 AI 思考过程（默认关闭）")
     parser.add_argument("--no-show-thinking", action="store_true", help=argparse.SUPPRESS)  # 兼容子进程调用
     parser.add_argument("--quiet", action="store_true", help="减少输出")
