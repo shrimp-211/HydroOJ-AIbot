@@ -80,6 +80,8 @@ python contest_daemon.py --interval 120
   "max_cost_per_problem": 5.0,
   "cost_accum_enable": true,
   "auto_supplement_testdata": false,
+  "difficulty_detect_enable": true,
+  "difficulty_skip_model": "",
   "model_router": {
     "tiers": { "flash": "...", "pro": "...", "max": "..." }
   },
@@ -105,6 +107,34 @@ python contest_daemon.py --interval 120
 - **全局关闭**: `config.json` 设 `"cost_accum_enable": false`（此时仅按单次会话限额）
 
 > 注: 限额为软上限——最后一次 AI 调用在检查通过后执行，可能超额（超额幅度=单次调用费用）。
+
+---
+
+## 难度判断开关
+
+默认会先让 AI 评估题目难度（8 级），再据此决定从哪一层模型开始解题。这一步可以整体关掉：
+
+```json
+{
+  "difficulty_detect_enable": false,
+  "difficulty_skip_model": "deepseek-v4-pro"
+}
+```
+
+- **`difficulty_detect_enable: false`** — 跳过难度评估这次 AI 调用（少一次请求、少一份费用），题解里也不会再插入难度标签
+- **`difficulty_skip_model`** — 关闭难度判断时用哪个模型：
+  - 留空 → 沿用 `model_router` 的首个层级（默认 flash），失败后照常升级
+  - 填 `model_router` 分层里的模型（如 pro/max 层的模型）→ 从该层开始，失败后继续向上升级
+  - 填分层之外的模型 → 本次**只使用该模型**，不再走 flash→pro→max 分层
+- 命令行可临时切换（不修改配置文件）：
+
+```bash
+python oj_solver.py 1178 --no-difficulty-detect
+python oj_solver.py 1178 --difficulty-skip-model deepseek-v4-pro
+```
+
+> 比赛守护进程/私信触发的子进程同样会读取 `config.json` 中的这两项，也可用环境变量
+> `OJ_DIFFICULTY_DETECT=0` / `OJ_DIFFICULTY_SKIP_MODEL=...` 覆盖。
 
 ---
 
@@ -174,12 +204,13 @@ Phase 0: 免费模型快速尝试 (glm-4.6v-flash)
   ├─ AC? → 完成
   └─ 429? → 自动切换 flash→pro→max
 
-Phase 1: 难度判断 + 标签筛选
+Phase 1: 难度判断 + 标签筛选   ← 可用 difficulty_detect_enable: false 跳过
   ├─ 8级难度评估
   └─ 100+标签库筛选候选 (≤10)
+     跳过时: 直接用 difficulty_skip_model（未配置则用分层首个模型），不插入难度标签
 
 Phase 2: 三层循环
-  外层 (模型升级): flash → pro → max
+  外层 (模型升级): flash → pro → max（指定了分层外的模型时只用该模型）
   中层 (换思路): generate ×2
   内层 (修正): submit → fix ×2
 
@@ -215,7 +246,9 @@ Phase 2: 三层循环
 ## 测试
 
 ```bash
-python -m pytest test_core.py -q    # 33 个单元测试
+python -m pytest -q                 # 86 个单元测试（test_core.py + test_optimizations.py）
+python -m pytest test_core.py -q    # 仅核心逻辑（33 个）
+python -m pytest test_optimizations.py -q   # 仅优化项回归（53 个）
 ```
 
 ---
@@ -233,3 +266,5 @@ python -m pytest test_core.py -q    # 33 个单元测试
 | `OJ_TD_MODEL` | 测试数据补充模型 |
 | `OJ_BENCHMARK_MODEL` | 标程题解模型 |
 | `OJ_DELAY_MODE` | 延迟模式开关 (≥20题自动) |
+| `OJ_DIFFICULTY_DETECT` | 是否判断题目难度 (1/0，默认 1) |
+| `OJ_DIFFICULTY_SKIP_MODEL` | 关闭难度判断时使用的模型 |

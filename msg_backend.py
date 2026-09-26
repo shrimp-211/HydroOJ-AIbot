@@ -23,7 +23,10 @@ class MsgBackend:
         self.whitelist = whitelist
         self.push_list = push_list
         self.interval = interval
-        self.processed: set[str] = set()
+        # 用 dict 当「有序集合」：既能 O(1) 判重，又能按插入顺序淘汰旧键。
+        # 原先用 set + list(...)[-500:]，切片顺序随哈希变化，淘汰几乎是随机的，
+        # 可能把刚处理过的消息键丢掉，导致同一条私信被重复执行。
+        self.processed: dict[str, None] = {}
         self.cmd_queue: queue.Queue = queue.Queue()
         self._running = False
         self._load_processed()
@@ -37,12 +40,10 @@ class MsgBackend:
             pass
 
     def send(self, uid: int, text: str):
+        """发送私信。复用 oj_common 的限速 + 403 自动重新登录重试。"""
         try:
-            from oj_common import MSG_LIMITER
-            MSG_LIMITER.wait()
-            self.s.post(f"{self.root}/home/messages",
-                json={"operation": "send", "uid": uid, "content": text},
-                headers={"Accept": "application/json"}, timeout=15)
+            from oj_common import push_oj_message
+            push_oj_message(self.s, self.root, text, push_uids=[uid])
         except Exception as e:
             log.warning("[消息] 发送失败: %s", e)
 
@@ -57,21 +58,28 @@ class MsgBackend:
         content = msg.get("content", "")
         mid = msg.get("_id", "")  # MongoDB ObjectId 含时间
         raw = f"{content}|{mid[:8]}"
-        return hashlib.md5(raw.encode()).hexdigest()[:16]
+        try:
+            # usedforsecurity=False：FIPS 合规环境下 md5 会被禁用，这里只是
+            # 做去重指纹，不用于安全用途。
+            return hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()[:16]
+        except TypeError:
+            return hashlib.md5(raw.encode()).hexdigest()[:16]
 
     def _load_processed(self):
         try:
-            with open(".msg_processed.json", "r") as f:
-                self.processed = set(json.load(f))
+            with open(".msg_processed.json", "r", encoding="utf-8") as f:
+                self.processed = dict.fromkeys(json.load(f))
         except Exception:
-            self.processed = set()
+            self.processed = {}
 
     def _save_processed(self):
+        """原子保存最近的去重键（保留 MAX_PROCESSED 条，先进先出）。"""
+        while len(self.processed) > MAX_PROCESSED:
+            self.processed.pop(next(iter(self.processed)), None)
         try:
-            from pathlib import Path
             tmp = ".msg_processed.json.tmp"
-            with open(tmp, "w") as f:
-                json.dump(list(self.processed)[-500:], f)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(list(self.processed), f)
             Path(tmp).replace(".msg_processed.json")
         except Exception: pass
 
@@ -109,7 +117,7 @@ class MsgBackend:
         text = msg.get("content", "").strip()
         key = self._msg_key(msg)
         if key in self.processed: return
-        self.processed.add(key)
+        self.processed[key] = None
         self._save_processed()
 
         if str(uid) not in self.whitelist:

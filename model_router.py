@@ -2,6 +2,7 @@
 """多模型路由 — 8 级难度评估 + 自动选择模型和思考深度"""
 
 import os, json, logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -13,7 +14,11 @@ class ModelTier:
         self.thinking = thinking_levels
 
     def current_thinking(self, level: int = 0) -> str:
-        return self.thinking[level] if level < len(self.thinking) else ""
+        # level 可能为负或超出列表长度（重试次数 > 配置的思考档位时），
+        # 越界一律返回空串，让调用方退回模型默认推理强度。
+        if not isinstance(level, int) or level < 0 or level >= len(self.thinking):
+            return ""
+        return self.thinking[level]
 
 
 class ModelRouter:
@@ -108,17 +113,44 @@ KMP,Manacher,AC自动机,后缀数组,后缀自动机,扩展KMP
 
     @classmethod
     def parse_diff_and_tags(cls, text: str) -> tuple:
-        """解析难度判断结果，返回 (difficulty: int, tags: list[str])"""
+        """解析难度判断结果，返回 (difficulty: int, tags: list[str])
+
+        兼容模型的实际输出偏差：
+        - 全角冒号（`难度：4`）与 Markdown 包裹（`**难度**: 4`）
+        - 多位数难度（`难度: 10` 曾因逐字符取数字被解析成 1）
+        - 标签写成 `[标签: a, b]` / `标签：a，b`（全角逗号、方括号）
+        """
         diff = 3
-        tags = []
-        for line in text.strip().split("\n"):
-            if "难度" in line or "难度:" in line:
-                nums = [int(c) for c in line if c.isdigit()]
-                if nums:
-                    diff = max(1, min(8, nums[0]))
-            elif "标签" in line or "标签:" in line or "tag" in line.lower():
-                tag_part = line.split(":", 1)[-1] if ":" in line else line
-                tags = [t.strip() for t in tag_part.replace("，", ",").split(",") if t.strip()]
+        tags: list[str] = []
+        got_diff = False
+        clean = text.replace("**", "").replace("`", "")
+        for line in clean.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # 难度与标签可能出现在同一行（模型自行合并输出），因此分别判断
+            if not got_diff:
+                m_diff = re.search(r"(?:难度|difficulty|level)\s*[:：]?\s*(\d+)", line, re.I)
+                if m_diff is None and "难度" in line:
+                    m_diff = re.search(r"(\d+)", line)
+                if m_diff:
+                    diff = max(1, min(8, int(m_diff.group(1))))
+                    got_diff = True
+            if "标签" in line or "tag" in line.lower():
+                # 取「标签」/「tag」关键字之后的部分（同一行还可能带难度前缀，
+                # 形如「难度:3 标签: 模拟」，所以不能只按首个冒号切分）
+                m_tag = re.search(r"(?:标签|tag)\s*[:：]?\s*(.*)$", line, re.I)
+                tag_part = m_tag.group(1) if m_tag else line
+                tag_part = tag_part.strip().strip("[]【】").strip()
+                candidates = [t.strip() for t in re.split(r"[,，、;；]", tag_part) if t.strip()]
+                if candidates and not tags:
+                    # 去重保序 + 最多 10 个
+                    seen, uniq = set(), []
+                    for t in candidates:
+                        if t not in seen:
+                            seen.add(t)
+                            uniq.append(t)
+                    tags = uniq[:10]
         return diff, tags
 
     # ── 标签筛选 prompt（求解时最终确定 ≤5 个）──
@@ -134,19 +166,44 @@ KMP,Manacher,AC自动机,后缀数组,后缀自动机,扩展KMP
         return f"tag: {', '.join(tags[:5])}"
 
     # ── 求解策略 ──
+    @staticmethod
+    def tier_index_for_difficulty(difficulty: int) -> int:
+        """8 级难度 → 起始层级索引（1-2→flash, 3-5→pro, 6-8→max）。
+
+        难度到层级的映射只在这里定义一份，求解读解流程等调用方复用它，
+        避免同一规则在多处各写一遍后逐渐漂移。
+        """
+        if difficulty <= 2:
+            return 0
+        if difficulty <= 5:
+            return 1
+        return 2
+
+    def clamp_index(self, idx: int) -> int:
+        """把层级索引夹到有效范围（tiers 可能只有 1~2 层）。"""
+        if not self.tiers:
+            return 0
+        return max(0, min(idx, len(self.tiers) - 1))
+
+    def tier_index_for_model(self, model_name: str) -> int | None:
+        """查找某个模型所在的层级索引，不在分层里返回 None。
+
+        用于「关闭难度判断 + 指定专用模型」的场景：如果该模型本身就是
+        model_router 的一层，就从这一层开始（保留原升级顺序，如 pro→max）。
+        """
+        if not model_name:
+            return None
+        for i, tier in enumerate(self.tiers):
+            if tier.model == model_name:
+                return i
+        return None
+
     def solve_strategy(self, difficulty: int, attempt: int) -> tuple[str, str]:
         """8 级难度映射: 1-2→flash, 3-5→pro, 6-8→max"""
         if not self.tiers:
             return self.default.model, ""
 
-        if difficulty <= 2:
-            idx = 0  # flash
-        elif difficulty <= 5:
-            idx = min(1, len(self.tiers) - 1)  # pro
-        else:
-            idx = min(2, len(self.tiers) - 1)  # max
-
-        idx = min(idx + attempt, len(self.tiers) - 1)
+        idx = self.clamp_index(self.tier_index_for_difficulty(difficulty) + attempt)
         tier = self.tiers[idx]
         thinking = tier.current_thinking(attempt)
         log.info("[路由] 难度%d 尝试%d → %s/%s", difficulty, attempt, tier.model, thinking or "无")

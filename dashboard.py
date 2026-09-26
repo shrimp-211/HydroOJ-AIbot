@@ -24,6 +24,9 @@ class ProblemRecord:
     elapsed_s: float = 0
     started_at: str = ""
     finished_at: str = ""
+    # 单调递增的起始时间戳。started_at 是 "%m-%d %H:%M:%S" 文本，跨年
+    # （12-31 → 01-01）时用 mktime 反解会得到负数或抛异常，超时判断因此失真。
+    started_epoch: float = 0.0
 
     def to_dict(self): return asdict(self)
 
@@ -64,9 +67,11 @@ class Dashboard:
     # ── 追踪 API ──
     def problem_start(self, pid: str, title: str = ""):
         with self._lock:
+            now = time.time()
             self.problems[pid] = ProblemRecord(
                 pid=pid, title=title,
-                started_at=datetime.now().strftime("%m-%d %H:%M:%S"))
+                started_at=datetime.now().strftime("%m-%d %H:%M:%S"),
+                started_epoch=now)
             self._mark_dirty()
 
     def problem_update(self, pid: str, **kwargs):
@@ -99,9 +104,21 @@ class Dashboard:
             self._mark_dirty()
 
     # ── 查询 API（供控制台/私聊/Web 使用）──
+    def _elapsed_since(self, record) -> float:
+        """记录已运行秒数。优先用 epoch；仅当旧数据没有该字段时回退文本解析。"""
+        if record.get("started_epoch"):
+            return max(0.0, time.time() - float(record["started_epoch"]))
+        started_at = record.get("started_at")
+        if not started_at:
+            return 0.0
+        try:
+            return max(0.0, time.time() - time.mktime(
+                time.strptime(started_at, "%m-%d %H:%M:%S")))
+        except (ValueError, OSError, OverflowError):
+            return 0.0
+
     def pending(self) -> list[dict]:
         """正在求解的题目。过滤掉历史中已完成的和超时的（>30min）。"""
-        import time as _time
         with self._lock:
             # 从 history 中提取已完成的 pid（contest 记录无 pid 字段，需跳过）
             done = {h["pid"] for h in self.history if isinstance(h, dict) and "pid" in h}
@@ -112,14 +129,8 @@ class Dashboard:
                 if str(r.pid) in done:
                     continue  # 历史中已有记录
                 # 超过 30 分钟视为已结束
-                if r.started_at:
-                    try:
-                        t = _time.mktime(_time.strptime(r.started_at, "%m-%d %H:%M:%S"))
-                        if _time.time() - t > 1800:
-                            continue
-                    except (ValueError, OSError, OverflowError):
-                        # Windows mktime 不支持 1900 年日期(%m-%d 解析无年份), 会抛 OverflowError
-                        pass
+                if self._elapsed_since(r.to_dict()) > 1800:
+                    continue
                 result.append(r.to_dict())
             return result
 
@@ -131,12 +142,15 @@ class Dashboard:
     def stats(self) -> dict:
         """汇总统计"""
         with self._lock:
-            total = len(self.history)
-            ac = sum(1 for h in self.history if h.get("status") == "ac")
-            total_tokens = sum(h.get("tokens_in", 0) + h.get("tokens_out", 0) for h in self.history)
-            total_cache = sum(h.get("cache_hit", 0) for h in self.history)
-            total_cost = sum(h.get("cost", 0) for h in self.history)
-            total_time = sum(h.get("elapsed_s", 0) for h in self.history)
+            # history 里混有比赛记录（无 pid/status），统计题目指标时必须排除，
+            # 否则比赛记录会被算成一次「失败」，AC 率随之偏低。
+            probs = [h for h in self.history if isinstance(h, dict) and "pid" in h]
+            total = len(probs)
+            ac = sum(1 for h in probs if h.get("status") == "ac")
+            total_tokens = sum(h.get("tokens_in", 0) + h.get("tokens_out", 0) for h in probs)
+            total_cache = sum(h.get("cache_hit", 0) for h in probs)
+            total_cost = sum(h.get("cost", 0) for h in probs)
+            total_time = sum(h.get("elapsed_s", 0) for h in probs)
             return {
                 "total": total, "ac": ac, "fail": total - ac,
                 "ac_rate": f"{ac}/{total}" if total else "0/0",
@@ -150,7 +164,7 @@ class Dashboard:
         today = datetime.now().strftime("%m-%d")
         with self._lock:
             today_records = [h for h in self.history
-                           if h.get("finished_at", "").startswith(today)]
+                             if "pid" in h and h.get("finished_at", "").startswith(today)]
             ac = sum(1 for h in today_records if h.get("status") == "ac")
             tokens = sum(h.get("tokens_in", 0) + h.get("tokens_out", 0) for h in today_records)
             cache = sum(h.get("cache_hit", 0) for h in today_records)
@@ -166,12 +180,7 @@ class Dashboard:
         if not p: return "📋 无正在求解的题目"
         lines = ["📋 正在求解:"]
         for r in p:
-            try:
-                elapsed = time.time() - time.mktime(
-                    time.strptime(r["started_at"], "%m-%d %H:%M:%S")
-                ) if r.get("started_at") else 0
-            except (ValueError, OSError, OverflowError):
-                elapsed = 0
+            elapsed = self._elapsed_since(r)
             tinfo = f" | Token {r['tokens_in']}i/{r['tokens_out']}o"
             if r.get("cache_hit"): tinfo += f" (缓存{r['cache_hit']})"
             if r.get("cost"): tinfo += f" ¥{r['cost']:.4f}"
