@@ -535,8 +535,11 @@ class TestSolveFlowOffline:
         # 用仓库自带的 config.json 作为模型表（没有则退回默认值），
         # 工件（dashboard.json / cost_accum.json）则写在隔离的 tmp 目录里。
         fixture = Path(__file__).with_name("config.json")
+        # 这些用例覆盖的是原三层循环；agent 路径由 TestSolverAgent 单独覆盖
+        overrides = {"agent_enabled": False}
+        overrides.update(cli or {})
         cfg = Config(config_path=str(fixture if fixture.exists() else tmp_path / "none.json"),
-                     cli_overrides=cli or {})
+                     cli_overrides=overrides)
         oj = _FakeOJ(cfg, verdicts)
         ai = _FakeAI(cfg)
         result = SolverOrchestrator(oj, ai, cfg).solve(

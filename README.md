@@ -219,6 +219,52 @@ Phase 2: 三层循环
 
 ---
 
+## Agent 求解（本地验证后再提交）
+
+默认开启。与原流程的区别是：**代码先在本地通过验证，才会提交到 OJ**。
+
+```
+Agent: 出方案 → 写代码 → 本地编译 → 跑题面样例 → 随机对拍 → 才提交 OJ
+         ↑______________ 失败则带着具体报错/diff/反例回炉 ______________|
+```
+
+具体能力：
+
+| 环节 | 作用 |
+|------|------|
+| 方案先行 | 先让模型分析问题、定算法、列边界清单，再写代码（`agent_plan`） |
+| 本地编译 | 编译错误（CE）在本地发现，不占用提交次数、不用等评测队列 |
+| 样例校验 | 样例不过时回喂**精确 diff**（输入/期望/实际），比 OJ 一句 WA 有用得多 |
+| 随机对拍 | 让模型额外给出暴力解 + 数据生成器，本地对拍，提交前抓出边界 WA（self-hack） |
+| 结构化记忆 | 每轮失败写入日志（试过什么、错在哪），后续修正不再重复同一条死路 |
+| 预算控制 | 轮次 / 提交次数 / 总时长 / 费用四重上限，达到即停 |
+
+配置（`config.json`）：
+
+```json
+{
+  "agent_enabled": true,
+  "agent_max_steps": 6,
+  "agent_max_submissions": 4,
+  "agent_max_seconds": 900,
+  "agent_stress_enable": true,
+  "agent_stress_rounds": 30,
+  "agent_run_timeout": 10
+}
+```
+
+命令行：`--no-agent`（关闭）、`--agent-steps N`、`--no-stress`（只做编译+样例）。
+环境变量：`OJ_AGENT_ENABLE` / `OJ_AGENT_MAX_STEPS` / `OJ_AGENT_STRESS`。
+
+依赖与降级：C++ 需要本机有 `g++`/`clang++`（Python 题用 `python3`）。**检测不到工具链时会
+自动回退到原来的三层循环**，不会因为缺编译器而报错。
+
+> ⚠️ 安全提示：本地验证会执行 AI 生成的代码。已限制单次运行超时、输出大小，
+> POSIX 下还会限制地址空间/CPU 时间并在超时后杀进程组，但这**不是真正的沙箱**。
+> 请把机器人跑在可丢弃的环境里，不要给它过高权限。
+
+---
+
 ## 难度系统
 
 | Lv | 标签 | 颜色 | 模型 |
@@ -246,9 +292,10 @@ Phase 2: 三层循环
 ## 测试
 
 ```bash
-python -m pytest -q                 # 86 个单元测试（test_core.py + test_optimizations.py）
+python -m pytest -q                 # 132 个单元测试
 python -m pytest test_core.py -q    # 仅核心逻辑（33 个）
 python -m pytest test_optimizations.py -q   # 仅优化项回归（53 个）
+python -m pytest test_agent.py -q   # 仅 agent 求解层（36 个，缺 g++ 时自动跳过编译相关用例）
 ```
 
 ---

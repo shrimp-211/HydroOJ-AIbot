@@ -8,6 +8,7 @@ benchmark_processed.json
 processed_contests.json
 .msg_processed.json
 logs/
+agent_work/
 *.log
 .oj_cookies*.json
 td_output_*/
