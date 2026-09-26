@@ -10,6 +10,56 @@ from dataclasses import dataclass, field, asdict
 log = logging.getLogger(__name__)
 
 
+# AppConfig 字段 ↔ config.json 键名的唯一映射表。
+# reload()（读）、save()（写）、repair()（补）三处全部由它派生，
+# 避免以前三份手写映射表各自漂移（auto_supplement_testdata /
+# max_cost_per_problem / cost_accum_enable 曾漏在 repair 之外）。
+FIELD_TO_JSON = {
+    # OJ
+    "oj_root": "oj_root",
+    "oj_base": "oj_base",
+    "username": "username",
+    "password": "password",
+    # AI 全局默认值
+    "ai_base_url": "ai_base_url",
+    "ai_model": "ai_model",
+    "ai_api_key": "ai_api_key",
+    "ai_reasoning_effort": "ai_reasoning_effort",
+    "ai_max_tokens": "ai_max_tokens",
+    "ai_vision_model": "ai_vision_model",
+    "max_problem_images": "max_problem_images",
+    # 难度判断开关（关闭时不调用难度评估模型，直接使用 difficulty_skip_model）
+    "difficulty_detect_enable": "difficulty_detect_enable",
+    "difficulty_skip_model": "difficulty_skip_model",
+    # 代码 / 运行时
+    "lang": "code_lang",
+    "verify_timeout": "verify_timeout",
+    "cookie_jar": "cookie_jar",
+    "show_thinking": "show_thinking",
+    # 监控
+    "monitor_domains": "monitor_domains",
+    "monitor_interval": "monitor_interval",
+    "monitor_state_file": "monitor_state_file",
+    # 消息
+    "msg_whitelist": "msg_whitelist",
+    "msg_push_list": "msg_push_list",
+    "msg_superuser": "msg_superuser",
+    "msg_interval": "msg_interval",
+    "msg_blocked_cmds": "msg_blocked_cmds",
+    "msg_push_events": "msg_push_events",
+    # 模型表
+    "models": "models",
+    "model_router": "model_router",
+    # 其他
+    "code_obfuscate": "code_obfuscate",
+    "benchmark_users": "benchmark_users",
+    "auto_supplement_testdata": "auto_supplement_testdata",
+    "max_cost_per_problem": "max_cost_per_problem",
+    "cost_accum_enable": "cost_accum_enable",
+}
+JSON_TO_FIELD = {v: k for k, v in FIELD_TO_JSON.items()}
+
+
 @dataclass
 class AppConfig:
     # OJ
@@ -26,6 +76,9 @@ class AppConfig:
     # 多模态视觉模型（题面含图时优先使用，见 is_vision_model）
     ai_vision_model: str = "deepseek-v4-flash-vision-exp"
     max_problem_images: int = 4  # 每道题最多下载几张题面图片
+    # 难度判断：关闭后跳过难度评估调用（省一次 AI 请求），改用 difficulty_skip_model
+    difficulty_detect_enable: bool = True
+    difficulty_skip_model: str = ""  # 关闭难度判断时使用的模型（空=沿用分层默认）
     # Code
     lang: str = "cc.cc14o2"
     # Runtime
@@ -67,7 +120,10 @@ class ConfigManager:
         self._lock = threading.Lock()
         self._mtime: float = 0
         self._mtime_cache: float = 0
+        self._mtime_probe: float = 0.0   # 上次 stat 时间（避免每次属性访问都打盘）
+        self._mtime_stat: float = -1.0   # 上次 stat 结果
         self._callbacks: list = []
+        self._model_cache: dict[str, dict] = {}
         self.reload()
         # CLI 覆盖（最高优先级）
         if cli_overrides:
@@ -78,6 +134,7 @@ class ConfigManager:
                         setattr(self._config, k, v)
                     else:
                         log.warning("[!] 未知配置项 '%s'，已忽略", k)
+                self._model_cache.clear()
         if auto_reload:
             self._start_watcher()
 
@@ -97,50 +154,67 @@ class ConfigManager:
         raise AttributeError(f"'{type(self).__name__}' 无 '{name}' 属性")
 
     # ---- 加载 ----
+    @staticmethod
+    def _coerce(current, val):
+        """把 JSON/env 里的原始值转换成与 AppConfig 字段一致的类型。
+        返回 (ok, value)；无法转换时返回 (False, None)，调用方跳过该字段。
+        """
+        if current is None or isinstance(current, list) or isinstance(current, dict):
+            return True, val
+        if isinstance(current, bool):
+            if isinstance(val, str):
+                low = val.strip().lower()
+                if low in ("true", "1", "yes", "on"):
+                    return True, True
+                if low in ("false", "0", "no", "off", ""):
+                    return True, False
+                return False, None
+            return True, bool(val)
+        if isinstance(current, int):
+            if isinstance(val, bool):
+                return True, int(val)
+            if isinstance(val, str):
+                try:
+                    return True, int(val.strip())
+                except ValueError:
+                    return False, None
+            if isinstance(val, (int, float)):
+                return True, int(val)
+            return False, None
+        if isinstance(current, float):
+            try:
+                return True, float(val)
+            except (TypeError, ValueError):
+                return False, None
+        if isinstance(current, str):
+            return (True, val) if isinstance(val, str) else (True, str(val))
+        return True, val
+
     def reload(self):
         with self._lock:
             c = AppConfig()
             # 1. JSON 文件
             if self._path.exists():
-                with open(self._path, "r", encoding="utf-8") as f:
-                    j = json.load(f)
-                field_map = {
-                    "oj_root": "oj_root", "oj_base": "oj_base",
-                    "username": "username", "password": "password",
-                    "ai_base_url": "ai_base_url", "ai_model": "ai_model",
-                    "ai_api_key": "ai_api_key", "ai_reasoning_effort": "ai_reasoning_effort",
-                    "ai_max_tokens": "ai_max_tokens",
-                    "ai_vision_model": "ai_vision_model",
-                    "max_problem_images": "max_problem_images", "lang": "code_lang",
-                    "verify_timeout": "verify_timeout",
-                    "cookie_jar": "cookie_jar", "show_thinking": "show_thinking",
-                    "monitor_domains": "monitor_domains",
-                    "monitor_interval": "monitor_interval",
-                    "monitor_state_file": "monitor_state_file",
-                    "msg_whitelist": "msg_whitelist",
-                    "msg_push_list": "msg_push_list",
-                    "msg_superuser": "msg_superuser",
-                    "msg_interval": "msg_interval",
-                    "models": "models",
-                    "model_router": "model_router",
-                    "msg_blocked_cmds": "msg_blocked_cmds",
-                    "msg_push_events": "msg_push_events",
-                    "code_obfuscate": "code_obfuscate",
-                    "benchmark_users": "benchmark_users",
-                    "auto_supplement_testdata": "auto_supplement_testdata",
-                    "max_cost_per_problem": "max_cost_per_problem",
-                    "cost_accum_enable": "cost_accum_enable",
-                }
-                for field, key in field_map.items():
-                    if key in j and hasattr(c, field):
+                try:
+                    with open(self._path, "r", encoding="utf-8") as f:
+                        j = json.load(f)
+                except (json.JSONDecodeError, OSError) as e:
+                    log.error("[配置] config.json 解析失败，使用默认值: %s", e)
+                    j = {}
+                if isinstance(j, dict):
+                    for field, key in FIELD_TO_JSON.items():
+                        if key not in j or not hasattr(c, field):
+                            continue
                         val = j[key]
-                        if isinstance(getattr(c, field), int) and isinstance(val, str):
-                            try: val = int(val)
-                            except ValueError: continue
-                        if isinstance(getattr(c, field), list) and isinstance(val, list):
-                            setattr(c, field, val)
-                        elif not isinstance(val, list):
-                            setattr(c, field, val)
+                        # list/dict 字段只接受同类型；标量字段做类型收敛
+                        current = getattr(c, field)
+                        if isinstance(current, list) and not isinstance(val, list):
+                            continue
+                        if isinstance(current, dict) and not isinstance(val, dict):
+                            continue
+                        ok, converted = self._coerce(current, val)
+                        if ok:
+                            setattr(c, field, converted)
             # 2. 环境变量 (OJ_ / AI_ 前缀)
             env_map = {
                 "oj_root": ["OJ_ROOT"],
@@ -152,6 +226,10 @@ class ConfigManager:
                 "ai_api_key": ["OJ_AI_API_KEY", "AI_API_KEY"],
                 "ai_reasoning_effort": ["OJ_AI_REASONING_EFFORT"],
                 "ai_max_tokens": ["OJ_AI_MAX_TOKENS", "AI_MAX_TOKENS"],
+                "ai_vision_model": ["OJ_AI_VISION_MODEL"],
+                "cookie_jar": ["OJ_COOKIE_JAR"],
+                "difficulty_detect_enable": ["OJ_DIFFICULTY_DETECT", "DIFFICULTY_DETECT"],
+                "difficulty_skip_model": ["OJ_DIFFICULTY_SKIP_MODEL", "DIFFICULTY_SKIP_MODEL"],
                 "lang": ["OJ_LANG"],
                 "verify_timeout": ["OJ_VERIFY_TIMEOUT", "VERIFY_TIMEOUT"],
             }
@@ -160,14 +238,23 @@ class ConfigManager:
                 for key in keys:
                     if key in os.environ and hasattr(c, field):
                         val = os.environ[key]
-                        if isinstance(getattr(c, field), int):
-                            try: val = int(val)
-                            except ValueError: continue
-                        setattr(c, field, val)
+                        ok, converted = self._coerce(getattr(c, field), val)
+                        if not ok:
+                            continue
+                        setattr(c, field, converted)
                         break
             self._config = c
-            self._mtime = self._path.stat().st_mtime if self._path.exists() else 0
+            self._mtime = self._stat_mtime()
+            self._mtime_stat = self._mtime
+            self._mtime_probe = time.monotonic()
+            self._model_cache.clear()
             self._notify()
+
+    def _stat_mtime(self) -> float:
+        try:
+            return self._path.stat().st_mtime
+        except OSError:
+            return 0.0
 
     def save(self):
         """保存当前配置到文件（保留 models/model_router 的注释键）"""
@@ -179,37 +266,16 @@ class ConfigManager:
                     with open(self._path, "r", encoding="utf-8") as f:
                         existing = json.load(f)
                 except Exception: pass
-            j = {
-                "oj_root": self._config.oj_root,
-                "oj_base": self._config.oj_base,
-                "ai_base_url": self._config.ai_base_url,
-                "ai_model": self._config.ai_model,
-                "ai_reasoning_effort": self._config.ai_reasoning_effort,
-                "ai_max_tokens": self._config.ai_max_tokens,
-                "ai_vision_model": self._config.ai_vision_model,
-                "max_problem_images": self._config.max_problem_images,
-                "code_lang": self._config.lang,
-                "username": self._config.username,
-                "password": self._config.password,
-                "verify_timeout": self._config.verify_timeout,
-                "cookie_jar": self._config.cookie_jar,
-                "show_thinking": self._config.show_thinking,
-                "monitor_domains": self._config.monitor_domains,
-                "monitor_interval": self._config.monitor_interval,
-                "monitor_state_file": self._config.monitor_state_file,
-                "msg_whitelist": self._config.msg_whitelist,
-                "msg_push_list": self._config.msg_push_list,
-                "msg_superuser": self._config.msg_superuser,
-                "msg_interval": self._config.msg_interval,
-                "models": self._config.models,
-                "model_router": self._config.model_router,
-                "msg_blocked_cmds": self._config.msg_blocked_cmds,
-                "msg_push_events": self._config.msg_push_events,
-                "code_obfuscate": self._config.code_obfuscate,
-            }
+            # 由 FIELD_TO_JSON 统一生成，新增配置项不需要再手动登记。
+            # 旧实现是手写字典，漏掉了 benchmark_users / auto_supplement_testdata /
+            # max_cost_per_problem / cost_accum_enable —— 每次 save() 都会把这四项
+            # 从 config.json 里删掉，等于静默丢失用户设置。
+            j = {json_key: getattr(self._config, attr)
+                 for attr, json_key in FIELD_TO_JSON.items()
+                 if hasattr(self._config, attr)}
             # 不保存敏感字段（凭据由 .env 管理）
             for sensitive in ("password", "ai_api_key"):
-                j.pop(sensitive, None)
+                j.pop(FIELD_TO_JSON.get(sensitive, sensitive), None)
             # 保留原有注释键
             for k in existing:
                 if k.startswith("_") and k not in j:
@@ -220,18 +286,24 @@ class ConfigManager:
                     for k, v in existing[section].items():
                         if k.startswith("_") and section in j and isinstance(j[section], dict):
                             j[section][k] = v
-            with open(self._path, "w", encoding="utf-8") as f:
+            # 原子写入：避免进程中断时把 config.json 截断成半个文件
+            tmp = str(self._path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(j, f, indent=2, ensure_ascii=False)
-            self._mtime = self._path.stat().st_mtime
+            Path(tmp).replace(self._path)
+            self._mtime = self._stat_mtime()
+            self._mtime_stat = self._mtime
 
     # ---- 热重载 ----
     def _check_reload(self) -> bool:
-        if not self._path.exists(): return False
-        now = time.time()
-        if now - self._mtime_cache < 5:
+        """文件 mtime 变化检测。5s 内只 stat 一次，避免高频属性访问打盘。"""
+        now = time.monotonic()
+        if now - self._mtime_probe < 5:
             return False
-        self._mtime_cache = now
-        return self._path.stat().st_mtime > self._mtime
+        self._mtime_probe = now
+        mtime = self._stat_mtime()
+        self._mtime_stat = mtime
+        return mtime > self._mtime
 
     def _start_watcher(self):
         def _watch():
@@ -267,6 +339,8 @@ class ConfigManager:
             for k, v in kwargs.items():
                 if hasattr(self._config, k):
                     setattr(self._config, k, v)
+            # 覆盖可能影响 get_model_config 的合并结果，缓存必须失效
+            self._model_cache.clear()
 
     def repair(self) -> list[str]:
         """补齐 config.json 中缺失的字段（用 AppConfig 默认值填充），返回新增的字段列表。"""
@@ -277,35 +351,16 @@ class ConfigManager:
                 j = json.load(f)
         except Exception:
             return []
-
-        # AppConfig → JSON key 映射
-        key_map = {
-            "oj_root": "oj_root", "oj_base": "oj_base",
-            "username": "username", "password": "password",
-            "ai_base_url": "ai_base_url", "ai_model": "ai_model",
-            "ai_api_key": "ai_api_key", "ai_reasoning_effort": "ai_reasoning_effort",
-            "ai_max_tokens": "ai_max_tokens",
-            "ai_vision_model": "ai_vision_model",
-            "max_problem_images": "max_problem_images", "code_lang": "lang",
-            "verify_timeout": "verify_timeout",
-            "cookie_jar": "cookie_jar", "show_thinking": "show_thinking",
-            "monitor_domains": "monitor_domains",
-            "monitor_interval": "monitor_interval",
-            "monitor_state_file": "monitor_state_file",
-            "msg_whitelist": "msg_whitelist",
-            "msg_push_list": "msg_push_list",
-            "msg_superuser": "msg_superuser",
-            "msg_interval": "msg_interval",
-            "msg_blocked_cmds": "msg_blocked_cmds",
-            "msg_push_events": "msg_push_events",
-            "code_obfuscate": "code_obfuscate",
-            "benchmark_users": "benchmark_users",
-            "models": "models", "model_router": "model_router",
-        }
-
+        if not isinstance(j, dict):
+            return []
         added = []
         c = self.cfg
-        for json_key, attr_name in key_map.items():
+        # 敏感字段不落盘（凭据统一由 .env 管理，避免明文写进 config.json）
+        sensitive = {"password", "ai_api_key"}
+        # 由统一的 FIELD_TO_JSON 派生，保证「补齐」与「读取」认为的键名完全一致
+        for attr_name, json_key in FIELD_TO_JSON.items():
+            if attr_name in sensitive:
+                continue
             if json_key not in j and hasattr(c, attr_name):
                 val = getattr(c, attr_name)
                 j[json_key] = val
@@ -329,29 +384,42 @@ class ConfigManager:
         """启动时校验配置，返回警告列表（空=无问题）"""
         warnings = []
         c = self.cfg
-        if not c.oj_root.startswith("http"):
+        if not str(c.oj_root or "").startswith("http"):
             warnings.append("oj_root 不是有效 URL")
-        if not c.ai_base_url.startswith("http"):
+        if not str(c.ai_base_url or "").startswith("http"):
             warnings.append("ai_base_url 不是有效 URL")
-        if c.verify_timeout <= 0:
+        if not isinstance(c.verify_timeout, int) or c.verify_timeout <= 0:
             warnings.append("verify_timeout 应 > 0")
         if not c.models:
             warnings.append("models 段为空，请配置至少一个模型")
         else:
             for name, md in c.models.items():
-                if name.startswith("_"):
+                if name.startswith("_") or not isinstance(md, dict):
                     continue
                 if md.get("base_url") and not str(md["base_url"]).startswith("http"):
                     warnings.append(f"模型 {name} 的 base_url 无效")
-                if md.get("max_tokens", 0) <= 0:
-                    warnings.append(f"模型 {name} 的 max_tokens 无效")
+                # max_tokens 允许缺省（继承全局），但显式写了非法值要报出来。
+                # 注意配置里可能写成 null / "128000"，直接比较会抛 TypeError。
+                mt = md.get("max_tokens", None)
+                if mt is not None:
+                    try:
+                        mt_int = int(mt)
+                    except (TypeError, ValueError):
+                        warnings.append(f"模型 {name} 的 max_tokens 不是整数: {mt!r}")
+                    else:
+                        if mt_int <= 0:
+                            warnings.append(f"模型 {name} 的 max_tokens 无效: {mt!r}")
         # 检查 model_router tiers 引用的模型是否存在
         router = c.model_router or {}
-        tiers = router.get("tiers", {})
+        tiers = router.get("tiers", {}) if isinstance(router, dict) else {}
         model_names = {k for k in c.models if not k.startswith("_")}
         for tier, name in tiers.items():
             if name and name not in model_names:
                 warnings.append(f"model_router tiers.{tier} 引用了不存在的模型 '{name}'")
+        # 关闭难度判断时使用的模型同样要存在，否则会一路撞到「API Key 未配置」
+        skip_model = (c.difficulty_skip_model or "").strip()
+        if not c.difficulty_detect_enable and skip_model and skip_model not in model_names:
+            warnings.append(f"difficulty_skip_model 引用了不存在的模型 '{skip_model}'")
         if warnings:
             log.warning("[配置校验] %d 个警告:", len(warnings))
             for w in warnings:
@@ -365,20 +433,30 @@ class ConfigManager:
     def get_model_config(self, model_name: str) -> dict:
         """获取指定模型的完整配置，合并模型自身字段与全局默认值。
         返回: {base_url, api_key, max_tokens, reasoning_effort, pricing}"""
+        cached = self._model_cache.get(model_name)
+        if cached is not None:
+            return cached
         cfg = self.cfg
         md = cfg.models.get(model_name) if cfg.models else None
         if md is None:
-            return dict(base_url=cfg.ai_base_url, api_key=self.api_key,
-                        max_tokens=cfg.ai_max_tokens,
-                        reasoning_effort=cfg.ai_reasoning_effort, pricing={})
-        return dict(
-            base_url=md.get("base_url") or cfg.ai_base_url,
-            api_key=self._resolve_model_api_key(md.get("api_key")) or self.api_key,
-            max_tokens=md.get("max_tokens") or cfg.ai_max_tokens,
-            reasoning_effort=md.get("reasoning_effort")
-                if md.get("reasoning_effort") is not None else cfg.ai_reasoning_effort,
-            pricing=md.get("pricing") or {},
-        )
+            result = dict(base_url=cfg.ai_base_url, api_key=self.api_key,
+                          max_tokens=cfg.ai_max_tokens,
+                          reasoning_effort=cfg.ai_reasoning_effort, pricing={})
+        else:
+            if not isinstance(md, dict):
+                md = {}
+            result = dict(
+                base_url=md.get("base_url") or cfg.ai_base_url,
+                api_key=self._resolve_model_api_key(md.get("api_key")) or self.api_key,
+                max_tokens=md.get("max_tokens") or cfg.ai_max_tokens,
+                reasoning_effort=md.get("reasoning_effort")
+                    if md.get("reasoning_effort") is not None else cfg.ai_reasoning_effort,
+                pricing=md.get("pricing") or {},
+            )
+        # 每次 AI 调用都会走这里（经 get_model_base_url / api_key / max_tokens），
+        # 缓存后省掉重复的 dict 拷贝与环境变量解析。
+        self._model_cache[model_name] = result
+        return result
 
     def _resolve_model_api_key(self, val) -> str:
         """解析模型级 api_key：null → 返回空；全大写 → 环境变量引用；含. → 字面值"""

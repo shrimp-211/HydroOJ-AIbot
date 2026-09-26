@@ -11,6 +11,7 @@ import threading
 import logging
 import requests
 from pathlib import Path
+from urllib.parse import urlparse
 
 # ═══════════════════════════════════════════════════════════════
 # 日志
@@ -21,13 +22,21 @@ def setup_logging(quiet: bool = False, verbose: bool = False,
     - quiet: 仅 WARNING+
     - verbose: DEBUG+
     - log_file: 文件路径（支持 {date} 占位符，默认 logs/daemon_{date}.log）
+
+    可重复调用：旧 handler 会被关闭并移除，避免同一进程内多次初始化
+    （如 WebUI 调用子模块）导致日志重复输出与文件句柄泄漏。
     """
     from datetime import datetime
     from logging.handlers import RotatingFileHandler
     console_level = logging.WARNING if quiet else (logging.DEBUG if verbose else logging.INFO)
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)  # 根级别放开，由各 handler 控制
-    root.handlers.clear()
+    for old in list(root.handlers):
+        root.removeHandler(old)
+        try:
+            old.close()  # 关闭文件句柄，否则 Windows 上无法删除/轮转日志
+        except Exception:
+            pass
 
     # 控制台 — 简洁格式，仅 INFO+
     console = logging.StreamHandler()
@@ -95,7 +104,8 @@ def _recover_login(session, root: str):
     try:
         username = os.environ.get("OJ_USERNAME", "")
         password = os.environ.get("OJ_PASSWORD", "")
-        if smart_login(session, root, username, password, ".oj_cookies.json"):
+        jar = os.environ.get("OJ_COOKIE_JAR", ".oj_cookies.json")
+        if smart_login(session, root, username, password, jar):
             logging.getLogger(__name__).info("[*] 403 后重新登录成功")
     except Exception:
         pass
@@ -104,7 +114,6 @@ def _recover_login(session, root: str):
 def push_oj_message(session, root: str, text: str, push_uids: list[int] = None,
                     requester: int = 0):
     """向 OJ 用户发送私信。限速 + 403 自动重新登录重试。"""
-    import requests as _r
     targets = set()
     if requester > 0:
         targets.add(requester)
@@ -112,20 +121,20 @@ def push_oj_message(session, root: str, text: str, push_uids: list[int] = None,
         targets.update(push_uids)
     if not targets:
         return
-    _send_round(session, root, text, targets)
+    got_403 = _send_round(session, root, text, targets)
     # 403 后重新登录并重试一轮
-    if _last_post_403:
+    if got_403:
         logging.getLogger(__name__).warning("[!] 推送 403，重新登录后重试")
         _recover_login(session, root)
         _send_round(session, root, text, targets)
 
 
-_last_post_403 = False
+def _send_round(session, root: str, text: str, targets: set) -> bool:
+    """发送一轮私信（带限速），返回本轮是否出现 403。
 
-
-def _send_round(session, root: str, text: str, targets: set):
-    """发送一轮私信（带限速），记录是否出现 403。"""
-    global _last_post_403
+    以返回值而非模块级全局变量传递状态：守护进程/并发求解下多个线程会同时
+    推送，全局标志会互相覆盖，导致漏掉或误触发重新登录。
+    """
     MSG_LIMITER.wait()
     got_403 = False
     for uid in targets:
@@ -137,7 +146,7 @@ def _send_round(session, root: str, text: str, targets: set):
                 got_403 = True
         except requests.RequestException:
             pass  # 推送失败不影响主流程
-    _last_post_403 = got_403
+    return got_403
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -232,20 +241,34 @@ def accum_add(pid, cost: float) -> float:
 # .env 加载
 # ═══════════════════════════════════════════════════════════════
 def load_dotenv(env_path: str = ".env"):
-    """加载 .env 文件到 os.environ（已存在的变量不覆盖）"""
+    """加载 .env 文件到 os.environ（已存在的变量不覆盖）。
+
+    支持 `export KEY=value`、行内注释、单双引号包裹的值，以及 Windows 下
+    用记事本保存出的 UTF-8 BOM。
+    """
     p = Path(env_path)
     if not p.exists():
         return
-    with open(p, "r", encoding="utf-8") as f:
+    with open(p, "r", encoding="utf-8-sig") as f:
         for line in f:
-            line = line.strip()
+            line = line.strip().lstrip("\ufeff")
             if not line or line.startswith("#"):
                 continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
             if "=" not in line:
                 continue
             key, _, val = line.partition("=")
             key = key.strip()
-            val = val.strip().strip('"').strip("'")
+            val = val.strip()
+            # 引号内的 # 属于值本身；未加引号时 # 视为行内注释
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            else:
+                val = val.split("#", 1)[0].strip()
+                val = val.strip('"').strip("'")
+            if not key:
+                continue
             if key not in os.environ:
                 os.environ[key] = val
 
@@ -290,11 +313,14 @@ def create_session(verify_ssl: bool = True) -> requests.Session:
                 return retry_after if retry_after else 3
             return super().get_retry_after(response)
 
+    # 多线程提交（contest_solver 默认 4 线程）时连接池需大于默认的 10，
+    # 否则并发请求会退化为串行等待空闲连接。
     retry = RateLimitRetry(total=3, backoff_factor=2,
                            status_forcelist=[429, 502, 503, 504],
                            allowed_methods=["GET", "POST"])
-    s.mount("https://", HTTPAdapter(max_retries=retry))
-    s.mount("http://", HTTPAdapter(max_retries=retry))
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=32, pool_maxsize=32)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     return s
 
 
@@ -306,18 +332,34 @@ def smart_login(session, root: str, username: str, password: str,
     """智能登录：优先复用 cookie，仅失效时重新登录。"""
     # 1. 尝试加载 cookie
     if load_cookies(session, cookie_jar):
-        try:
-            r = session.get(f"{root}/d/system/p/1",
-                            headers={"Accept": "application/json"}, timeout=10)
-            if r.status_code == 200:
-                return True
-        except Exception:
-            pass
+        if _cookie_session_valid(session, root):
+            return True
     # 2. 完整登录
     if oj_login(session, root, username, password):
         save_cookies(session, cookie_jar)
         return True
     return False
+
+
+def _cookie_session_valid(session, root: str) -> bool:
+    """校验已加载的 cookie 是否仍是登录态。
+
+    先看题目接口（最便宜）；若该域无 P1 或返回异常，再回退到首页检查
+    `window.UserContext`。避免把「接口 404」误判成「cookie 失效」而每次
+    都重新登录。
+    """
+    try:
+        r = session.get(f"{root}/d/system/p/1",
+                        headers={"Accept": "application/json"}, timeout=10)
+        if r.status_code == 200:
+            return True
+    except requests.RequestException:
+        return False  # 网络异常：交给 oj_login 重试，避免雪崩式重登
+    try:
+        r = session.get(f"{root}/", timeout=10)
+        return r.status_code == 200 and "window.UserContext" in r.text
+    except requests.RequestException:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -331,7 +373,10 @@ def load_cookies(session: requests.Session, path: str) -> bool:
         with open(p, "r", encoding="utf-8") as f:
             cookies = json.load(f)
         for c in cookies:
-            session.cookies.set(c["name"], c["value"], domain=c.get("domain", ""))
+            name, value = c.get("name"), c.get("value")
+            if not name:
+                continue
+            session.cookies.set(name, value or "", domain=c.get("domain") or "")
         logging.getLogger(__name__).debug("[*] 已加载 %d 条 cookie", len(cookies))
         return True
     except (json.JSONDecodeError, OSError) as e:
@@ -340,11 +385,16 @@ def load_cookies(session: requests.Session, path: str) -> bool:
 
 
 def save_cookies(session: requests.Session, path: str):
-    with open(path, "w", encoding="utf-8") as f:
+    """原子写入 cookie jar，避免进程被强杀时留下半截文件。"""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump([{"name": c.name, "value": c.value, "domain": c.domain}
                    for c in session.cookies], f)
-    try: os.chmod(path, 0o600)
-    except OSError: pass
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass  # Windows 上无意义，但 POSIX 下限制权限
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -396,26 +446,36 @@ def fetch_user_id(session: requests.Session, root: str) -> int | None:
 # ═══════════════════════════════════════════════════════════════
 # URL 解析
 # ═══════════════════════════════════════════════════════════════
+# 比赛/训练 ID 不一定是十六进制（Hydro 允许自定义 ID），统一用宽松字符集。
+_ID = r"[A-Za-z0-9_-]+"
+
+
+def _strip_url_noise(url: str) -> str:
+    """去掉查询串/锚点/末尾斜杠，粘贴带 ?tid= 的链接也能解析。"""
+    return url.strip().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
 def parse_contest_or_problem(url: str) -> dict:
     """解析比赛/训练/题目 URL → {type, base_url, domain_id, pids?, contest_id?}"""
+    url = _strip_url_noise(url)
     # 比赛 URL
-    m = re.match(r"(https?://[^/]+)/d/([^/]+)/contest/([a-f0-9]+)", url)
+    m = re.match(rf"(https?://[^/]+)/d/({_ID})/contest/({_ID})", url)
     if m:
         return {"type": "contest", "base_url": m.group(1),
                 "domain_id": m.group(2), "contest_id": m.group(3)}
     # 训练 URL（支持 /training/{id} 和 /d/{domain}/training/{id}）
-    m = re.match(r"(https?://[^/]+)(?:/d/([^/]+))?/training/([a-f0-9]+)", url)
+    m = re.match(rf"(https?://[^/]+)(?:/d/({_ID}))?/training/({_ID})", url)
     if m:
         return {"type": "training", "base_url": m.group(1),
                 "domain_id": m.group(2) or "system", "training_id": m.group(3)}
     # 带 domain 的题目 URL
-    m = re.match(r"(https?://[^/]+)/d/([^/]+)/p(?:roblem)?/([a-zA-Z0-9]+)", url)
+    m = re.match(rf"(https?://[^/]+)/d/({_ID})/p(?:roblem)?/({_ID})", url)
     if m:
         return {"type": "problem", "base_url": m.group(1),
                 "domain_id": m.group(2), "pids": [m.group(3)],
                 "title_prefix": f"单题 P{m.group(3)}"}
     # 根路径题目 URL
-    m = re.match(r"(https?://[^/]+)/p(?:roblem)?/([a-zA-Z0-9]+)", url)
+    m = re.match(rf"(https?://[^/]+)/p(?:roblem)?/({_ID})", url)
     if m:
         return {"type": "problem", "base_url": m.group(1),
                 "domain_id": "system", "pids": [m.group(2)],
@@ -425,7 +485,8 @@ def parse_contest_or_problem(url: str) -> dict:
 
 def parse_problem_url(raw: str) -> tuple:
     """解析题目链接 → (root, api_base, pid)"""
-    m = re.match(r"(https?://[^/]+)(?:/d/([^/]+))?/p(?:roblem)?/([a-zA-Z0-9]+)", raw)
+    raw = _strip_url_noise(raw)
+    m = re.match(rf"(https?://[^/]+)(?:/d/({_ID}))?/p(?:roblem)?/({_ID})", raw)
     if m:
         root, domain, pid = m.group(1), m.group(2), m.group(3)
         return root, f"{root}/d/{domain}" if domain else f"{root}/d/system", pid
@@ -436,7 +497,7 @@ def parse_problem_url(raw: str) -> tuple:
 
 def parse_root(url: str) -> str:
     """从 URL 提取根地址"""
-    m = re.match(r"https?://[^/]+", url)
-    if m:
-        return m.group(0)
+    parsed = urlparse(_strip_url_noise(url))
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
     raise ValueError(f"无法从 '{url}' 提取根地址")

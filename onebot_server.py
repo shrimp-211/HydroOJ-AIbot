@@ -82,28 +82,31 @@ def handle_message(data: dict):
 def cmd_solve(data: dict, args: str):
     if not args: send_reply(data, "格式: solve <题目ID或链接>"); return
     url = args
-    if args.isdigit(): url = f"https://oj.yuanyicode.com/p/{args}"
+    if args.isdigit():
+        url = f"{os.environ.get('OJ_ROOT', 'https://oj.yuanyicode.com').rstrip('/')}/p/{args}"
     elif not args.startswith("http"): send_reply(data, f"无法识别: {args}"); return
 
     global TASK_COUNTER
     TASK_COUNTER += 1
-    tid = f"task_{TASK_COUNTER}"
+    seq = TASK_COUNTER          # 捕获本次任务的编号；并发任务时读全局计数会串号
+    tid = f"task_{seq}"
     PENDING_TASKS[tid] = {"url": url, "user": data.get("user_id", "?")}
-    send_reply(data, f"任务 #{TASK_COUNTER} 已提交: {url}")
+    send_reply(data, f"任务 #{seq} 已提交: {url}")
 
     def run():
         sp = str(SCRIPT_DIR / "oj_solver.py")
         try:
             r = subprocess.run([sys.executable, sp, url, "--no-show-thinking"],
-                             capture_output=True, text=True, timeout=300, cwd=str(SCRIPT_DIR))
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=300, cwd=str(SCRIPT_DIR))
             out = r.stdout[-1000:] if len(r.stdout) > 1000 else r.stdout
             summary = "\n".join(line for line in out.split("\n")
                 if any(k in line for k in ["AC", "得分", "完成", "题解", "评测", "结果", "异常", "失败"]))[-500:]
-            send_reply(data, f"#{TASK_COUNTER} 完成:\n{summary or out[-500:]}")
+            send_reply(data, f"#{seq} 完成:\n{summary or out[-500:]}")
         except subprocess.TimeoutExpired:
-            send_reply(data, f"#{TASK_COUNTER} 超时(5min)")
+            send_reply(data, f"#{seq} 超时(5min)")
         except Exception as e:
-            send_reply(data, f"#{TASK_COUNTER} 异常: {e}")
+            send_reply(data, f"#{seq} 异常: {e}")
         finally:
             PENDING_TASKS.pop(tid, None)
 

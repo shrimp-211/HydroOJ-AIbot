@@ -6,6 +6,7 @@ import sys
 import re
 import json
 import time
+import html
 import base64
 import logging
 import threading
@@ -49,6 +50,58 @@ DEFAULT_PROMPTS = {
 _ai_last_call = 0.0
 _ai_lock = threading.Lock()
 
+
+# 语言扩展名 → 代码围栏里可能出现的别名（模型经常用 cpp / C++ / cc 混写）
+_LANG_ALIASES = {
+    "cpp": ["cpp", "c++", "cc", "cxx", "c"],
+    "python": ["python", "py", "python3"],
+    "java": ["java"],
+    "go": ["go", "golang"],
+    "rust": ["rust", "rs"],
+    "javascript": ["javascript", "js"],
+    "csharp": ["csharp", "cs", "c#"],
+    "php": ["php"],
+    "ruby": ["ruby", "rb"],
+    "pascal": ["pascal", "pas"],
+}
+
+
+def _code_fence_pattern(ext: str | None) -> str:
+    """构造匹配 Markdown 代码块的正则。
+
+    ext=None 时不限制语言（任意围栏），否则只匹配该语言及其常见别名。
+    兼容 ``` 与 ~~~ 围栏、语言标记后附带的额外说明、大小写差异。
+    """
+    if not ext:
+        return r"(?:```|~~~)[^\n]*\n(.*?)(?:```|~~~)"
+    names = _LANG_ALIASES.get(ext, [])
+    names.append(ext)
+    lang = "|".join(re.escape(n) for n in dict.fromkeys(names))
+    return rf"(?:```|~~~)\s*(?:{lang})\b[^\n]*\n(.*?)(?:```|~~~)"
+
+
+def _hour_in_range(hour: int, start: int, end: int) -> bool:
+    """判断整点 hour 是否落在 [start, end) 区间内，支持跨零点（如 23→7）。"""
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def _extract_tag_prefix(text: str) -> tuple[list[str], str]:
+    """摘掉题解开头的 `[标签: a, b]` 前缀，返回 (标签列表, 剩余正文)。
+
+    同时接受半角/全角冒号与各种空白，避免 AI 写成「[标签：x]」时该行
+    残留在题解正文里。
+    """
+    m = re.match(r"\s*\[标签\s*[:：]\s*([^\]]*)\]\s*", text)
+    if not m:
+        return [], text
+    tags = [t.strip() for t in re.split(r"[,，、;；]", m.group(1)) if t.strip()]
+    return tags, text[m.end():].lstrip()
+
+
 def _ai_delay():
     global _ai_last_call
     with _ai_lock:
@@ -71,6 +124,7 @@ class AIClient:
     def __init__(self, config: Config):
         self.config = config
         self._clients: dict[tuple, object] = {}  # lazy cache by (base_url, api_key)
+        self._client_lock = threading.Lock()
         self._show_thinking = config.get("show_thinking", False)
 
     def _get_client(self, model_name: str = ""):
@@ -79,10 +133,11 @@ class AIClient:
         base_url = self.config.get_model_base_url(name)
         api_key = self.config.get_model_api_key(name)
         cache_key = (base_url, api_key)
-        if cache_key not in self._clients:
-            self._clients[cache_key] = OpenAI(api_key=api_key, base_url=base_url,
-                                              timeout=180.0, max_retries=2) if api_key else None
-        return self._clients[cache_key]
+        with self._client_lock:  # 多线程求解时避免重复创建/竞态写入
+            if cache_key not in self._clients:
+                self._clients[cache_key] = OpenAI(api_key=api_key, base_url=base_url,
+                                                  timeout=180.0, max_retries=2) if api_key else None
+            return self._clients[cache_key]
 
     @staticmethod
     def _load_prompts() -> dict:
@@ -93,6 +148,7 @@ class AIClient:
             return {}
 
     _cached_prompts: dict | None = None
+    _prompts_lock = threading.Lock()
 
     @staticmethod
     def reload_class_prompts():
@@ -102,8 +158,9 @@ class AIClient:
         _log.getLogger(__name__).info("[+] 提示词已标记重载，下次调用生效")
 
     def _p(self, key: str, default: str = "") -> str:
-        if AIClient._cached_prompts is None:
-            AIClient._cached_prompts = self._load_prompts()
+        with AIClient._prompts_lock:
+            if AIClient._cached_prompts is None:
+                AIClient._cached_prompts = self._load_prompts()
         return AIClient._cached_prompts.get(key) or DEFAULT_PROMPTS.get(key, default)
 
     @property
@@ -124,7 +181,8 @@ class AIClient:
         )
 
     def generate(self, problem: dict, use_stream: bool = False,
-                 difficulty: int = 0, candidate_tags: list[str] = None) -> dict | None:
+                 difficulty: int = 0, candidate_tags: list[str] = None,
+                 model: str = "", effort: str = "") -> dict | None:
         """
         difficulty: 0=未判断/默认, 1-8 (8级制)
         candidate_tags: 难度评定时筛选的候选标签，解题模型终选
@@ -166,11 +224,13 @@ class AIClient:
             prompt += self._tag_prompt(candidate_tags)
         # 题面图片：多模态模型优先携带（_call_ai 内部按模型能力过滤）
         images = problem.get("images") or []
-        return self._call_ai(prompt, sys_msg, use_stream, images=images)
+        return self._call_ai(prompt, sys_msg, use_stream, images=images,
+                             model=model, effort=effort)
 
     def fix(self, problem: dict, code: str, solution_md: str,
             verdict: dict, retry_num: int = 1, use_stream: bool = False,
-            history: list | None = None, difficulty: int = 0) -> dict | None:
+            history: list | None = None, difficulty: int = 0,
+            model: str = "", effort: str = "") -> dict | None:
         """修正代码。无上下文时直接重新 generate 而非修正。"""
         log.info("[*] 第%d次修正：反馈错误给 AI ...", retry_num)
         ext = self.config.lang_ext
@@ -178,7 +238,8 @@ class AIClient:
         # 无上下文 → 直接重新生成，不修正
         if not history:
             log.info("[*] 无上下文，重新调用 generate ...")
-            return self.generate(problem, use_stream=use_stream, difficulty=difficulty)
+            return self.generate(problem, use_stream=use_stream, difficulty=difficulty,
+                                 model=model, effort=effort)
 
         # 连续对话修正
         ce_info = verdict.get("compiler_text", "")
@@ -204,29 +265,34 @@ class AIClient:
         fix_prompt = tpl.format(**fmt)
         return self._call_ai_with_messages(
             history + [{"role": "user", "content": fix_prompt}], use_stream,
-            images=problem.get("images") or [])
+            images=problem.get("images") or [], model=model, effort=effort)
 
-    def obfuscate(self, code: str) -> dict | None:
+    def obfuscate(self, code: str, model: str = "", effort: str = "") -> dict | None:
         """混淆代码：仅将代码发给 AI 要求强力混淆"""
         log.info("[*] 调用 AI 混淆代码 ...")
         ext = self.config.lang_ext
         tpl = self._p("obfuscate", DEFAULT_PROMPTS.get("obfuscate", ""))
         prompt = tpl.format(ext=ext, code=code)
         sys_msg = self._p("system_obfuscate", DEFAULT_PROMPTS.get("system_obfuscate", ""))
-        result = self._call_ai(prompt, sys_msg, use_stream=False)
+        result = self._call_ai(prompt, sys_msg, use_stream=False,
+                               model=model, effort=effort)
         if result:
             result["code"] = result.get("code", "") or code
         return result
 
-    def _build_args(self, messages: list, model: str = "") -> dict:
-        """构建 API 请求参数（provider 自适应，每模型独立配置）"""
+    def _build_args(self, messages: list, model: str = "", effort: str = "") -> dict:
+        """构建 API 请求参数（provider 自适应，每模型独立配置）。
+
+        model/effort 由调用方显式传入（路由层决定），不再依赖对全局
+        config 的临时改写，多个求解线程因此不会互相污染模型选择。
+        """
         model = model or self.config["ai_model"]
         base_url = self.config.get_model_base_url(model)
         max_tok = self.config.get_model_max_tokens(model)
         args = dict(model=model, messages=messages, max_tokens=max_tok)
         log.debug("[AI] 请求: model=%s base=%s max_tok=%d prompt_len=%d",
                   model, base_url, max_tok, len(str(messages)))
-        re_val = self.config.get_model_reasoning_effort(model)
+        re_val = effort or self.config.get_model_reasoning_effort(model)
         if re_val and "deepseek" in base_url:
             # 校验：只取逗号分隔的第一个值，确保是有效值
             valid_efforts = {"low", "medium", "high", "max", "xhigh"}
@@ -261,7 +327,7 @@ class AIClient:
         }
 
     def chat(self, messages: list, model: str = "", use_stream: bool = False,
-             max_tokens: int = 0) -> dict | None:
+             max_tokens: int = 0, effort: str = "") -> dict | None:
         """通用对话调用（模型参数化），供解题、标程解读等复用。
 
         返回 {content, usage, cost, elapsed_s, model} 或 None。
@@ -272,7 +338,7 @@ class AIClient:
         model = model or self.config["ai_model"]
         if self._get_client(model) is None:
             log.error("[-] API Key 未配置"); return None
-        args = self._build_args(messages, model)
+        args = self._build_args(messages, model, effort)
         if max_tokens:
             args["max_tokens"] = max_tokens
         t_start = time.monotonic()
@@ -311,7 +377,7 @@ class AIClient:
         if peaks:
             for peak in peaks:
                 hours = peak.get("hours", [])
-                if len(hours) >= 2 and hours[0] <= now < hours[1]:
+                if len(hours) >= 2 and _hour_in_range(now, hours[0], hours[1]):
                     inp_price = peak.get("input", inp_price)
                     out_price = peak.get("output", out_price)
                     if "cache_hit" in peak:
@@ -319,7 +385,7 @@ class AIClient:
                     break
         else:
             ph = pricing.get("peak_hours", [])
-            if ph and len(ph) >= 2 and ph[0] <= now < ph[1]:
+            if ph and len(ph) >= 2 and _hour_in_range(now, ph[0], ph[1]):
                 inp_price = pricing.get("peak_input", inp_price)
                 out_price = pricing.get("peak_output", out_price)
                 if "peak_cache_hit" in pricing:
@@ -331,12 +397,20 @@ class AIClient:
 
     @staticmethod
     def _extract_code(content: str, ext: str) -> str:
-        """从 AI 响应中提取最后一个代码块。"""
-        blocks = list(re.finditer(rf"```(?:{ext}|c\+\+|c)\s*\n(.+?)```", content, re.DOTALL))
-        return blocks[-1].group(1).strip() if blocks else ""
+        """从 AI 响应中提取最后一个代码块。
+
+        宽松匹配围栏：``` 或 ~~~、语言标记后可能跟额外说明（```cpp title=x）、
+        大小写混用（```C++）。真实模型输出经常带这些变体。
+        优先取与目标语言匹配的块；没有匹配时才回退到任意语言的块。
+        """
+        for pattern in (_code_fence_pattern(ext), _code_fence_pattern(None)):
+            blocks = list(re.finditer(pattern, content, re.DOTALL | re.IGNORECASE))
+            if blocks:
+                return blocks[-1].group(1).strip()
+        return ""
 
     def _parse_response(self, content: str, reasoning: str, usage_obj,
-                        t_start: float) -> dict:
+                        t_start: float, model: str = "") -> dict:
         """统一解析 AI 响应：提取代码、Token、耗时、费用"""
         if not content:
             log.error("[-] AI 返回内容为空"); return None
@@ -345,18 +419,21 @@ class AIClient:
             log.info(reasoning[:3000])
         code = self._extract_code(content, self.config.lang_ext)
         usage = self._extract_usage(usage_obj)
-        cost = self._calc_cost(usage)
+        cost = self._calc_cost(usage, model)
         elapsed = time.monotonic() - t_start
         log.info("[+] 耗时%.1fs | Token %di/%do | 费用¥%.4f | 内容%d字符 代码%d字符",
                  elapsed, usage.get("input", 0), usage.get("output", 0),
                  cost, len(content), len(code))
         return {"solution_md": content, "code": code, "raw": content,
-                "usage": usage, "elapsed_s": elapsed, "cost": cost}
+                "usage": usage, "elapsed_s": elapsed, "cost": cost,
+                "model": model or self.config["ai_model"]}
 
     # ---- 连续对话调用（复用 chat()，避免重复请求构建逻辑） ----
     def _call_ai_with_messages(self, messages: list, use_stream: bool = False,
-                               images: list | None = None) -> dict | None:
-        if images and self.config.is_vision_model(self.config["ai_model"]):
+                               images: list | None = None, model: str = "",
+                               effort: str = "") -> dict | None:
+        model = model or self.config["ai_model"]
+        if images and self.config.is_vision_model(model):
             # 将图片追加到最近的 user 消息（图片仅允许出现在 user 消息）
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i]["role"] == "user":
@@ -372,17 +449,20 @@ class AIClient:
                             content.append({"type": "image_url", "image_url": {"url": img}})
                     messages[i]["content"] = content
                     break
-        r = self.chat(messages, use_stream=use_stream)
+        r = self.chat(messages, model=model, use_stream=use_stream, effort=effort)
         if not r:
             return None
         code = self._extract_code(r["content"], self.config.lang_ext)
         return {"solution_md": r["content"], "code": code, "raw": r["content"],
-                "usage": r["usage"], "elapsed_s": r["elapsed_s"], "cost": r["cost"]}
+                "usage": r["usage"], "elapsed_s": r["elapsed_s"], "cost": r["cost"],
+                "model": r.get("model", model or self.config["ai_model"])}
 
     # ---- 核心调用 ----
     def _call_ai(self, user_prompt: str, system_msg: str,
-                 use_stream: bool = False, images: list | None = None) -> dict | None:
-        if self._get_client() is None: log.error("[-] API Key 未配置"); return None
+                 use_stream: bool = False, images: list | None = None,
+                 model: str = "", effort: str = "") -> dict | None:
+        model = model or self.config["ai_model"]
+        if self._get_client(model) is None: log.error("[-] API Key 未配置"); return None
         # 延迟模式：同 AI 服务请求至少间隔 2s
         if os.environ.get("OJ_DELAY_MODE") == "1":
             _ai_delay()
@@ -392,7 +472,7 @@ class AIClient:
             t_start = time.monotonic()
             user_content: str | list = user_prompt
             # 多模态：当前模型支持视觉且题面含图 → content 构造为块数组
-            model_now = self.config["ai_model"]
+            model_now = model
             if images and self.config.is_vision_model(model_now):
                 blocks = [{"type": "text", "text": user_prompt}]
                 for img in images:
@@ -401,10 +481,11 @@ class AIClient:
                 user_content = blocks
                 log.info("[多模态] 模型 %s 接收 %d 张图片", model_now, len(images))
             args = self._build_args([{"role": "system", "content": system_msg},
-                                     {"role": "user", "content": user_content}])
+                                     {"role": "user", "content": user_content}],
+                                    model, effort)
             content, reasoning, usage_obj = (self._stream_call(args) if use_stream
                                              else self._block_call(args))
-            return self._parse_response(content, reasoning, usage_obj, t_start)
+            return self._parse_response(content, reasoning, usage_obj, t_start, model)
         except requests.RequestException as e:
             log.error("[-] AI 网络异常: %s", e); return None
         except Exception as e:
@@ -541,26 +622,42 @@ class OJClient:
             log.error("[-] 获取题目网络异常: %s", e); return None
         if resp.status_code != 200:
             log.error("[-] 获取失败，状态码 %d", resp.status_code); return None
-        data = resp.json(); pdoc = data.get("pdoc", {})
+        try:
+            data = resp.json()
+        except ValueError:
+            log.error("[-] 题目接口返回的不是 JSON（可能需要登录，或域不存在）")
+            return None
+        pdoc = data.get("pdoc", {})
         content_raw = pdoc.get("content", ""); zh = ""
         # 题面图片：从 HTML/Markdown 提取 <img> / ![]() 并下载为 base64 data URL
         images = self._extract_images(content_raw, resp.url)
         if isinstance(content_raw, str):
-            if content_raw.startswith("{"):
-                try: zh = json.loads(content_raw).get("zh", content_raw)
-                except json.JSONDecodeError: zh = content_raw
-            elif content_raw.startswith("<"):
-                zh = re.sub(r'<[^>]+>', ' ', content_raw)
-                zh = re.sub(r'&[a-z]+;', ' ', zh)
+            stripped = content_raw.strip()
+            if stripped.startswith("{"):
+                # 多语言题面：{"zh": "...", "en": "..."}
+                try:
+                    parsed = json.loads(stripped)
+                    zh = parsed.get("zh", content_raw) if isinstance(parsed, dict) else content_raw
+                except json.JSONDecodeError:
+                    zh = content_raw
+            elif stripped.startswith("<"):
+                # HTML 题面 → 纯文本。用 html.unescape 覆盖全部实体，
+                # 旧写法只处理 &[a-z]+;，&#39; 这类数字实体会原样进入提示词。
+                zh = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", stripped,
+                            flags=re.DOTALL | re.IGNORECASE)
+                zh = re.sub(r'<[^>]+>', ' ', zh)
+                zh = html.unescape(zh)
                 zh = re.sub(r'\s+', ' ', zh).strip()
             else:
                 zh = content_raw
         elif isinstance(content_raw, dict): zh = content_raw.get("zh", str(content_raw))
         title = pdoc.get("title", f"P{pid}")
         # 从 JSON pdoc 提取 tag/config 信息（优先），回退到 HTML
-        config = pdoc.get("config", {}) or {}
-        time_limit = f"{config.get('timeMax', 0)}ms" if config.get("timeMax") else ""
-        memory_limit = f"{config.get('memoryMax', 0)}MiB" if config.get("memoryMax") else ""
+        pdoc_config = pdoc.get("config", {}) or {}
+        time_limit = (f"{pdoc_config.get('timeMax', 0)}ms"
+                      if pdoc_config.get("timeMax") else "")
+        memory_limit = (f"{pdoc_config.get('memoryMax', 0)}MiB"
+                        if pdoc_config.get("memoryMax") else "")
         tags = []
         if "tag" in pdoc and pdoc["tag"]:
             tags = pdoc["tag"] if isinstance(pdoc["tag"], list) else [pdoc["tag"]]
@@ -748,10 +845,16 @@ class OJClient:
 
             # 有测试点数据 → 检查是否为终态
             # 终态判断：score>0 或 有时间/内存数据 或 有编译错误
+            # 另加一条：所有测试点都已不在 PENDING(0) 状态 —— 某些评测机在
+            # 全 RE/全 WA 且未记录耗时的情况下 score/time/memory 全为 0，
+            # 只看前三项会一直等到超时，最终把已经拿到的评测结果丢掉。
             score = rdoc.get("score", 0)
             has_timing = rdoc.get("time", 0) > 0 or rdoc.get("memory", 0) > 0
             has_ce = bool(rdoc.get("compilerTexts", []))
-            is_terminal = score > 0 or has_timing or has_ce
+            # 必须同时满足「整体状态不再是 PENDING(0)」和「所有测试点都有终态」，
+            # 避免评测机逐个回填测试点时提前拿到不完整的结果。
+            all_settled = st != 0 and all(c.get("status", 0) != 0 for c in cases)
+            is_terminal = score > 0 or has_timing or has_ce or all_settled
 
             if not is_terminal:
                 log.info("    评测中，等待最终结果 ... (已等 %ds, score=%d)", waited, score)
@@ -932,21 +1035,19 @@ class SolverOrchestrator:
         INNER_RETRIES = 2  # 内层：按错误修正次数
 
         # 多模型路由
-        from model_router import ModelRouter
+        from model_router import ModelRouter, ModelTier
         router = ModelRouter(config_manager=self.config)
         route_model = router.default.model
         route_thinking = ""
+        # 实际产出当前代码的模型（banner/footer 用它，而不是全局默认模型）
+        used_model = self.config["ai_model"]
+        used_effort = ""
 
         # 题面含图 → 优先多模态视觉模型（纯文本模型无法理解图片）
         has_image = bool(problem.get("images"))
         vision_model = self.config.get_vision_model() if has_image else ""
         if has_image and vision_model:
             log.info("[多模态] 题面含 %d 张图，视觉模型 %s 可用", len(problem["images"]), vision_model)
-
-        def _apply_route():
-            self.config.set_override(ai_model=route_model)
-            if route_thinking:
-                self.config.set_override(ai_reasoning_effort=route_thinking)
 
         # ═══ Phase 0: 免费模型快速尝试（不修正） ═══
         free_model = "glm-4.6v-flash"
@@ -959,7 +1060,6 @@ class SolverOrchestrator:
         if has_free:
             route_model = free_model
             route_thinking = ""
-            _apply_route()
             log.info("[路由] Phase0 free: %s", route_model)
         log.debug("[路由] free_model=%s fallback=%s has_free=%s",
                   free_model, fallback_model, has_free)
@@ -976,26 +1076,30 @@ class SolverOrchestrator:
         io_hint=problem.get('io_method') and f"IO方式: {problem['io_method']}" or '使用标准输入输出',
         ext=ext)
         result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
-                                  images=problem.get("images") or [])
+                                  images=problem.get("images") or [],
+                                  model=route_model, effort=route_thinking)
         # free 限流 → 自动切换 flash
         if result and result.get("_rate_limited"):
             log.info("[*] free 模型限流，切换 %s 重试", fallback_model)
-            self.config.set_override(ai_model=fallback_model, ai_reasoning_effort="high")
+            route_model, route_thinking = fallback_model, "high"
             result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
-                                      images=problem.get("images") or [])
+                                      images=problem.get("images") or [],
+                                      model=route_model, effort=route_thinking)
         if result and result.get("code"):
             code = result["code"]; solution_md = result["solution_md"]
             # 解析 AI 终选的标签
-            m_tag = re.match(r'\s*\[标签:\s*([^\]]+)\]\s*', solution_md)
-            if m_tag:
-                candidate_tags = [t.strip() for t in m_tag.group(1).split(",") if t.strip()]
-                solution_md = solution_md[m_tag.end():].lstrip()
+            parsed_tags, solution_md = _extract_tag_prefix(solution_md)
+            if parsed_tags:
+                candidate_tags = parsed_tags
             fu = result.get("usage", {})
             for k in ("input", "output", "total", "cache_hit"):
                 total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
             total_elapsed += result.get("elapsed_s", 0)
             total_cost += result.get("cost", 0)
-            banner = self._code_banner(usage=fu, cost=result.get("cost", 0))
+            used_model = result.get("model", route_model)
+            used_effort = route_thinking
+            banner = self._code_banner_for(used_model, usage=fu,
+                                           cost=result.get("cost", 0), effort=used_effort)
             if submit:
                 rid = self.oj.submit_code(pid, banner + code)
                 all_rids.append(rid)
@@ -1008,102 +1112,122 @@ class SolverOrchestrator:
                         log.info("[+] Phase0 AC! 用时 %.0fms, 内存 %.0fKB",
                                  verdict["time_ms"], verdict["memory_kb"])
 
-        # ═══ Phase 1: 难度判断 ═══
-        if not is_ac or difficulty == 0:
-            saved_model = self.config["ai_model"]
-            saved_effort = self.config.get_model_reasoning_effort(saved_model)
-            if has_free:
-                self.config.set_override(ai_model=free_model, ai_reasoning_effort="")
-            log.info("[路由] Phase1 难度判断 (模型=%s) ...",
-                     free_model if has_free else self.config["ai_model"])
+        # ═══ Phase 1: 难度判断（可用 difficulty_detect_enable 关闭） ═══
+        detect_enabled = bool(self.config.get("difficulty_detect_enable", True))
+        skip_model = (self.config.get("difficulty_skip_model") or "").strip()
+        if not detect_enabled:
+            # 跳过难度评估这一次 AI 调用，直接用配置的模型（或分层默认）开始求解
+            if skip_model:
+                log.info("[路由] 已关闭难度判断，使用专用模型: %s", skip_model)
+            else:
+                log.info("[路由] 已关闭难度判断，未配置 difficulty_skip_model，"
+                         "沿用分层默认: %s", router.default.model)
+        else:
+            diff_model = free_model if has_free else self.config["ai_model"]
+            log.info("[路由] Phase1 难度判断 (模型=%s) ...", diff_model)
             diff_prompt = router.DIFFICULTY_PROMPT.format(content=problem.get("content","")[:3000])
             diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。",
-                                           use_stream=False, images=problem.get("images") or [])
+                                           use_stream=False, images=problem.get("images") or [],
+                                           model=diff_model)
             if diff_result and diff_result.get("_rate_limited") and has_free:
                 log.info("[*] free 模型限流，切换 %s 判断难度", fallback_model)
-                self.config.set_override(ai_model=fallback_model, ai_reasoning_effort="high")
+                diff_model = fallback_model
                 diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。",
-                                               use_stream=False, images=problem.get("images") or [])
+                                               use_stream=False, images=problem.get("images") or [],
+                                               model=diff_model, effort="high")
             if diff_result:
                 difficulty, parsed_tags = ModelRouter.parse_diff_and_tags(diff_result.get("raw", ""))
                 if not candidate_tags:
                     candidate_tags = parsed_tags
             log.info("[路由] 难度判定: %d 级, 标签: %s", difficulty, candidate_tags)
-            # Phase0 AC 时恢复原模型（footer 需要正确的模型名）
-            if is_ac:
-                self.config.set_override(ai_model=saved_model, ai_reasoning_effort=saved_effort)
 
         # ═══ Phase 2: 三层循环 ═══
         # 外层：升级模型 | 中层：重新解题(换思路) | 内层：按错误修正
-        # 起始层级根据难度：difficulty 1→flash, 2→pro, 3→max
-        # 8级难度 → tier: 1-2→0(flash), 3-5→1(pro), 6-8→2(max)
-        if difficulty <= 2:    tier_start = 0
-        elif difficulty <= 5:  tier_start = 1
-        else:                  tier_start = 2
-        tier_start = min(tier_start, len(router.tiers) - 1)
-        for tier_idx in range(tier_start, len(router.tiers)):
+        # 起始层级由 ModelRouter 统一决定（1-2→flash, 3-5→pro, 6-8→max）
+        custom_tier = None
+        if not detect_enabled and skip_model:
+            found = router.tier_index_for_model(skip_model)
+            if found is None:
+                # 指定的模型不在 model_router 分层里 → 只用它解题，不做分层升级
+                custom_tier = ModelTier("custom", skip_model, [])
+                log.info("[路由] %s 不在 model_router 分层中，本次仅使用该模型", skip_model)
+            else:
+                custom_tier = None
+                tier_start = router.clamp_index(found)
+        else:
+            tier_start = router.clamp_index(router.tier_index_for_difficulty(difficulty))
+
+        if custom_tier is not None:
+            tier_plan = [(0, custom_tier)]
+        else:
+            tier_plan = [(i, router.tiers[i]) for i in range(tier_start, len(router.tiers))]
+
+        for tier_idx, tier in tier_plan:
             if is_ac: break
-            tier = router.tiers[tier_idx]
             # 题面含图 → 所有层优先视觉模型（纯文本 pro/max 无法理解图片）
             if has_image and vision_model:
                 route_model = vision_model
                 log.info("[多模态] 含图题目，层 %s 改用视觉模型 %s", tier.name, vision_model)
             else:
                 route_model = tier.model
-            # flash 层中层仅 1 次，其他层 2 次
-            mid_retries = 1 if tier_idx == 0 else MID_RETRIES
+            # flash 层（索引 0）中层仅 1 次，其他层 2 次；专用模型层按 2 次
+            mid_retries = 1 if (tier_idx == 0 and custom_tier is None) else MID_RETRIES
 
             for mid in range(mid_retries):
                 if is_ac: break
-                cost_cap = self.config.get("max_cost_per_problem", 5.0)
-                if accum_enabled and (accum_base + total_cost) >= cost_cap:
-                    log.warning("[-] 费用已达上限 ¥%.4f (累计¥%.4f+本次¥%.4f, cap=¥%.0f)，标记为费用超限",
-                                accum_base + total_cost, accum_base, total_cost, cost_cap)
+                if self._is_cost_capped(accum_enabled, accum_base, total_cost):
                     is_cost_capped = True; break
                 route_thinking = tier.current_thinking(mid)
-                _apply_route()
                 log.info("[三层] 模型=%s 中层=%d/%d 难度=%d",
                          route_model, mid + 1, mid_retries, difficulty)
 
                 result = self.ai.generate(problem, use_stream=use_stream, difficulty=difficulty,
-                                          candidate_tags=candidate_tags)
+                                          candidate_tags=candidate_tags,
+                                          model=route_model, effort=route_thinking)
                 if result and result.get("_rate_limited"):
                     # 降级模型: max→pro, pro→flash；含图时保持视觉模型（降级也沿用 vision）
                     prev_tier = tier_idx - 1
+                    # 专用模型层没有「上一层」，回退到分层默认（最便宜的一层），
+                    # 否则限流后这一层会直接失败，整个求解就此中断。
+                    if prev_tier >= 0:
+                        fb_tier = router.tiers[prev_tier]
+                    elif custom_tier is not None and router.tiers:
+                        fb_tier = router.tiers[0]
+                    else:
+                        fb_tier = None
                     if has_image and vision_model:
                         log.warning("[!] %s 限流，含图题目保持视觉模型 %s 重试",
                                     tier.name, vision_model)
                         route_model = vision_model
                         route_thinking = tier.current_thinking(mid)
-                        _apply_route()
-                        banner = self._code_banner()
                         result = self.ai.generate(problem, use_stream=use_stream, difficulty=difficulty,
-                                          candidate_tags=candidate_tags)
-                    elif prev_tier >= 0:
-                        fallback = router.tiers[prev_tier]
-                        log.warning("[!] %s 限流，降级到 %s 重试", tier.name, fallback.model)
-                        route_model = fallback.model
-                        route_thinking = fallback.current_thinking(mid)
-                        _apply_route()
-                        banner = self._code_banner()
+                                          candidate_tags=candidate_tags,
+                                          model=route_model, effort=route_thinking)
+                    elif fb_tier is not None:
+                        log.warning("[!] %s 限流，降级到 %s 重试", tier.name, fb_tier.model)
+                        route_model = fb_tier.model
+                        route_thinking = fb_tier.current_thinking(mid)
                         result = self.ai.generate(problem, use_stream=use_stream, difficulty=difficulty,
-                                          candidate_tags=candidate_tags)
+                                          candidate_tags=candidate_tags,
+                                          model=route_model, effort=route_thinking)
                     else:
                         log.warning("[!] 已经是底层模型，无备选")
                 if not result or not result.get("code"):
                     log.warning("[-] AI 未生成代码"); break
                 code = result["code"]; solution_md = result["solution_md"]
                 # 解析 AI 从候选标签中最终选定的标签（二次筛选）
-                m_tag = re.match(r'\s*\[标签:\s*([^\]]+)\]\s*', solution_md)
-                if m_tag:
-                    final_tags = [t.strip() for t in m_tag.group(1).split(",") if t.strip()]
-                    solution_md = solution_md[m_tag.end():].lstrip()
+                parsed_tags, solution_md = _extract_tag_prefix(solution_md)
+                if parsed_tags:
+                    final_tags = parsed_tags
                 fu = result.get("usage", {})
                 for k in ("input", "output", "total", "cache_hit"):
                     total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
                 total_elapsed += result.get("elapsed_s", 0)
                 total_cost += result.get("cost", 0)
-                banner = self._code_banner(usage=fu, cost=result.get("cost", 0))
+                used_model = result.get("model", route_model)
+                used_effort = route_thinking
+                banner = self._code_banner_for(used_model, usage=fu,
+                                               cost=result.get("cost", 0), effort=used_effort)
 
                 history = [
                     {"role": "system", "content": self.ai.SYS_SOLVE},
@@ -1128,10 +1252,7 @@ class SolverOrchestrator:
                         log.warning("[-] 内层修正 %d 次未 AC，得分 %d",
                                     INNER_RETRIES, verdict["score"]); break
                     # 费用上限检查
-                    cost_cap = self.config.get("max_cost_per_problem", 5.0)
-                    if accum_enabled and (accum_base + total_cost) >= cost_cap:
-                        log.warning("[-] 费用已达上限 ¥%.4f (累计¥%.4f+本次¥%.4f, cap=¥%.0f)，标记为费用超限",
-                                    accum_base + total_cost, accum_base, total_cost, cost_cap)
+                    if self._is_cost_capped(accum_enabled, accum_base, total_cost):
                         is_cost_capped = True; break
                     if verdict.get("is_system_error"):
                         log.warning("[!] 疑似评测机故障，直接重试提交")
@@ -1140,14 +1261,14 @@ class SolverOrchestrator:
                              verdict["score"], fix_i + 1,
                              mid + 1, MID_RETRIES, fix_i + 1, INNER_RETRIES)
                     fix = self.ai.fix(problem, code, solution_md, verdict, fix_i + 1,
-                                      use_stream=use_stream, history=history, difficulty=difficulty)
+                                      use_stream=use_stream, history=history, difficulty=difficulty,
+                                      model=route_model, effort=route_thinking)
                     if not fix: log.warning("[-] 修正失败"); break
                     code = fix["code"]; solution_md = fix["solution_md"]
                     # 解析修正后 AI 最终选定的标签（二次筛选）
-                    m_tag = re.match(r'\s*\[标签:\s*([^\]]+)\]\s*', solution_md)
-                    if m_tag:
-                        final_tags = [t.strip() for t in m_tag.group(1).split(",") if t.strip()]
-                        solution_md = solution_md[m_tag.end():].lstrip()
+                    parsed_tags, solution_md = _extract_tag_prefix(solution_md)
+                    if parsed_tags:
+                        final_tags = parsed_tags
                     history.append({"role": "user", "content": f"评测: 得分{verdict['score']}, {verdict.get('case_summary','')}"})
                     history.append({"role": "assistant", "content": solution_md})
                     fu = fix.get("usage", {})
@@ -1155,6 +1276,8 @@ class SolverOrchestrator:
                         total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
                     total_elapsed += fix.get("elapsed_s", 0)
                     total_cost += fix.get("cost", 0)
+                    if fix.get("model"):
+                        used_model = fix["model"]
 
         retry_count = max(0, len(all_verdicts) - 1); outer_count = retry_count; psid = None
 
@@ -1169,17 +1292,12 @@ class SolverOrchestrator:
         except Exception:
             obf_config = {}
         if is_ac and code and obf_config.get("enabled"):
-            # 切换到免费模型进行混淆
-            saved_model = self.config["ai_model"]
-            saved_effort = self.config.get_model_reasoning_effort(saved_model)
-            self.config.set_override(ai_model=free_model, ai_reasoning_effort="")
+            # 用免费模型做混淆（显式传参，不改动全局配置）
             log.info("[*] 调用 AI 混淆代码 (免费模型: %s) ...", free_model)
-            obf = self.ai.obfuscate(code)
+            obf = self.ai.obfuscate(code, model=free_model, effort="")
             if obf and obf.get("_rate_limited") and has_free:
                 log.info("[*] free 模型限流，切换 %s 混淆", fallback_model)
-                self.config.set_override(ai_model=fallback_model, ai_reasoning_effort="high")
-                obf = self.ai.obfuscate(code)
-            self.config.set_override(ai_model=saved_model, ai_reasoning_effort=saved_effort)
+                obf = self.ai.obfuscate(code, model=fallback_model, effort="high")
             if obf and obf.get("code"):
                 obf_code = obf["code"]
                 log.info("[+] 混淆完成，%d 字符 → %d 字符", len(code), len(obf_code))
@@ -1195,12 +1313,12 @@ class SolverOrchestrator:
         if post and solution_md:
             # 插入难度标签
             if difficulty > 0:
-                from model_router import ModelRouter
                 header = ModelRouter.difficulty_tag(difficulty)
                 if candidate_tags:
                     header += "\n" + ModelRouter.tags_tag(candidate_tags)
                 solution_md = header + "\n\n" + solution_md
-            footer = self._build_footer(total_elapsed, total_usage, retry_count, total_cost)
+            footer = self._build_footer(total_elapsed, total_usage, retry_count, total_cost,
+                                        used_model, used_effort)
             psid = self.oj.post_solution(pid, solution_md + footer)
 
         # 混淆后重新提交到原题/比赛
@@ -1243,8 +1361,28 @@ class SolverOrchestrator:
                 "retry_count": retry_count, "outer_count": retry_count,
                 "total_usage": total_usage, "total_cost": total_cost,
                 "total_elapsed": total_elapsed, "is_ac": is_ac, "pid": pid,
-                "model": self.config["ai_model"],
+                "model": used_model,
                 "is_cost_capped": is_cost_capped}
+
+    def _is_cost_capped(self, enabled: bool, accum_base: float, session_cost: float) -> bool:
+        """单题费用是否已达上限（累计历史 + 本次会话）。
+
+        原先在求解循环的两处各写一遍这段判断，容易漏改一边；
+        统一到这里，并附带一条 WARNING 日志。
+        """
+        if not enabled:
+            return False
+        cap = self.config.get("max_cost_per_problem", 5.0)
+        try:
+            cap = float(cap)
+        except (TypeError, ValueError):
+            return False
+        total = accum_base + session_cost
+        if total < cap:
+            return False
+        log.warning("[-] 费用已达上限 ¥%.4f (累计¥%.4f+本次¥%.4f, cap=¥%.2f)，标记为费用超限",
+                    total, accum_base, session_cost, cap)
+        return True
 
     def _notify_error(self, text: str):
         """求解失败时通知请求者（OJ_REQUESTER），避免静默失败无回复。"""
@@ -1308,10 +1446,14 @@ class SolverOrchestrator:
         return "#" if ext == "python" else "//"
 
     def _code_banner(self, usage: dict | None = None, cost: float = 0) -> str:
-        """生成代码头部注释，使用当前活跃模型的配置"""
+        """生成代码头部注释"""
+        return self._code_banner_for(self.config["ai_model"], usage, cost)
+
+    def _code_banner_for(self, model: str, usage: dict | None = None,
+                         cost: float = 0, effort: str = "") -> str:
+        """生成代码头部注释，显式指定模型（不再读取全局可变配置）"""
         c = self._comment_prefix()
-        model = self.config["ai_model"]
-        re_val = self.config.get_model_reasoning_effort(model)
+        re_val = effort or self.config.get_model_reasoning_effort(model)
         banner = (
             f"{c} 模型: {model}  "
             f"| 语言: {self.config['lang']}  "
@@ -1319,7 +1461,8 @@ class SolverOrchestrator:
             f"{c} 由 OJ Auto Solver 自动生成\n"
         )
         if usage:
-            banner += f"{c} Token: {usage['input']}i/{usage['output']}o/{usage['total']}t  "
+            banner += (f"{c} Token: {usage.get('input',0)}i/{usage.get('output',0)}o/"
+                       f"{usage.get('total',0)}t  ")
             if usage.get("cache_hit"):
                 banner += f"| 缓存命中: {usage['cache_hit']} "
             if cost > 0:
@@ -1327,9 +1470,10 @@ class SolverOrchestrator:
             banner += "\n"
         return banner + "\n"
 
-    def _build_footer(self, elapsed: float, usage: dict, retry_count: int, cost: float = 0) -> str:
-        model = self.config["ai_model"]
-        re_val = self.config.get_model_reasoning_effort(model)
+    def _build_footer(self, elapsed: float, usage: dict, retry_count: int, cost: float = 0,
+                      model: str = "", effort: str = "") -> str:
+        model = model or self.config["ai_model"]
+        re_val = effort or self.config.get_model_reasoning_effort(model)
         lines = [
             f"\n\n---\n",
             f"> 本题解由 **{model}** 生成 "
@@ -1338,8 +1482,9 @@ class SolverOrchestrator:
             f"| 总耗时: {elapsed:.1f}s",
         ]
         if usage:
-            lines.append(f"> Token 用量: {usage['input']} in / {usage['output']} out / {usage['total']} total"
-                        + (f" (缓存命中 {usage['cache_hit']})" if usage.get("cache_hit") else ""))
+            lines.append(f"> Token 用量: {usage.get('input',0)} in / {usage.get('output',0)} out / "
+                         f"{usage.get('total',0)} total"
+                         + (f" (缓存命中 {usage['cache_hit']})" if usage.get("cache_hit") else ""))
         if cost > 0:
             lines.append(f"> 预估费用: ¥{cost:.4f}")
         if retry_count > 0:
@@ -1350,6 +1495,45 @@ class SolverOrchestrator:
 # ═══════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════
+def build_cli_overrides(args, parsed_root: str = "", parsed_api_base: str = "") -> dict:
+    """把命令行参数转换成 ConfigManager 的覆盖字典。
+
+    单独抽成函数有两个原因：一是可被单元测试直接覆盖，二是修复 `--api-key-env`
+    一直失效的问题（旧实现写成 ai_api_key_env，ConfigManager 不认识这个字段，
+    只会静默打一条「未知配置项」告警，导致命令行传入的密钥被忽略）。
+    """
+    cli: dict = {}
+    for key in ("username", "password", "lang"):
+        val = getattr(args, key, None)
+        if val:
+            cli[key] = val
+    # --api-key-env 指定的是 API Key（可以是 sk-xxx 字面值，也可以是环境变量名）
+    if getattr(args, "api_key_env", None):
+        cli["ai_api_key"] = args.api_key_env
+    if getattr(args, "base_url", None):
+        cli["ai_base_url"] = args.base_url
+    if getattr(args, "model", None):
+        cli["ai_model"] = args.model
+    if getattr(args, "base", None):
+        cli["oj_base"] = args.base
+    if parsed_root:
+        cli["oj_root"] = parsed_root
+        cli["oj_base"] = parsed_api_base
+    if getattr(args, "cookie_jar", None):
+        cli["cookie_jar"] = args.cookie_jar
+    if getattr(args, "timeout", None):
+        cli["verify_timeout"] = args.timeout
+    # 难度判断随时可切换：--no-difficulty-detect 关闭，--difficulty-skip-model
+    # 指定关闭时使用的模型（传了专用模型即视为要关闭，避免"配了模型却没生效"）
+    if getattr(args, "difficulty_skip_model", None):
+        cli["difficulty_skip_model"] = args.difficulty_skip_model
+        cli["difficulty_detect_enable"] = False
+    if getattr(args, "no_difficulty_detect", False):
+        cli["difficulty_detect_enable"] = False
+    cli["show_thinking"] = bool(getattr(args, "show_thinking", False))
+    return cli
+
+
 def main():
     load_dotenv()
     from oj_common import setup_logging
@@ -1368,6 +1552,10 @@ def main():
     parser.add_argument("--no-post", action="store_true", help="不发布题解")
     parser.add_argument("--dry-run", action="store_true", help="仅抓取题目内容")
     parser.add_argument("--stream", action="store_true", help="AI 流式输出")
+    parser.add_argument("--no-difficulty-detect", action="store_true",
+                        help="跳过难度判断（少一次 AI 调用），配合 --difficulty-skip-model 指定所用模型")
+    parser.add_argument("--difficulty-skip-model", metavar="MODEL",
+                        help="关闭难度判断时使用的模型（默认沿用分层首个模型）")
     parser.add_argument("--show-thinking", action="store_true", help="显示 AI 思考过程（默认关闭）")
     parser.add_argument("--no-show-thinking", action="store_true", help=argparse.SUPPRESS)  # 兼容子进程调用
     parser.add_argument("--quiet", action="store_true", help="减少输出")
@@ -1387,17 +1575,7 @@ def main():
     if parsed_root:
         log.info("[*] 目标题目: %s/p/%s", parsed_api_base, parsed_pid)
 
-    cli = {}
-    for k in ["username", "password", "lang"]:
-        if getattr(args, k): cli[k] = getattr(args, k)
-    for k in ["api_key_env", "base_url", "model"]:
-        v = getattr(args, k.replace("-", "_"))
-        if v: cli[f"ai_{k.replace('-', '_')}"] = v
-    if args.base: cli["oj_base"] = args.base
-    if parsed_root: cli["oj_root"] = parsed_root; cli["oj_base"] = parsed_api_base
-    if args.cookie_jar: cli["cookie_jar"] = args.cookie_jar
-    if args.timeout: cli["verify_timeout"] = args.timeout
-    cli["show_thinking"] = args.show_thinking
+    cli = build_cli_overrides(args, parsed_root, parsed_api_base)
 
     config = Config(cli_overrides=cli)
     config.repair()  # 自动补齐缺失配置

@@ -41,8 +41,12 @@ AUTH_TOKEN = ""  # 如果设置，需要在请求头携带 X-Auth-Token
 
 
 def save_config(cfg: dict):
-    with open(ROOT / "config.json", "w", encoding="utf-8") as f:
+    """原子写入 config.json：先写临时文件再替换，避免写一半被中断后配置损坏。"""
+    path = ROOT / "config.json"
+    tmp = path.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+    tmp.replace(path)
 
 
 def broadcast(msg: str):

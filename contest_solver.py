@@ -21,6 +21,20 @@ _delay_mode = False
 _session_lock = threading.Lock()  # 共享 session 线程安全
 _push_session = None  # main() 登录后设为共享主 session
 
+
+def _set_delay_mode():
+    """开启延迟模式：本进程内 OJ 请求限速 ≥2s，并传递给子进程。
+
+    任务数达到阈值（默认 20）时调用。独立成函数是为了让「边入队边判断」
+    与「入队结束后的兜底判断」共用同一处实现，避免两处各自设置状态。
+    """
+    global _delay_mode
+    if _delay_mode:
+        return
+    _delay_mode = True
+    os.environ["OJ_DELAY_MODE"] = "1"
+    log.info("[!] 延迟模式已开启 (≥20题)，同服务请求间隔 ≥2s")
+
 def _push(text: str, to_uid: int = 0, event: str = ""):
     """推送消息。复用主 session + oj_common 限速/403重试。线程安全。"""
     if event:
@@ -168,27 +182,41 @@ def main():
     # 多线程处理所有比赛的所有题目
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         pending_tasks = []
+
+        def enqueue(base: str, domain: str, pid, title: str, cid: str = ""):
+            """题目入队前的统一闸门：查重 → 查测试数据 → 限速判断 → 提交任务。
+
+            原先这段逻辑在「单题 / 训练 / 比赛」三个分支里各写一遍（且细节
+            已出现分叉），改成一处实现，三种入口都走同一条路径。
+            """
+            problem_url = f"{base}/d/{domain}/p/{pid}"
+            if not args.force and has_existing_solution(s, base, domain, pid, user_id):
+                log.info("  #%s — 已有题解，跳过", pid)
+                if not os.environ.get("OJ_REQUESTER"):
+                    _push(f"⏭️ #{pid} 跳过(已有题解)", event="problem_skip")
+                return
+            if not _has_testdata(s, base, domain, pid):
+                if cfg.auto_supplement_testdata:
+                    log.info("  #%s — 无测试数据，自动补充 ...", pid)
+                    _run_supplement(problem_url)
+                else:
+                    log.info("  #%s — 无测试数据，跳过", pid)
+                    _no_data_skips.append(pid)
+                    return
+            _push(f"🔄 #{pid} 开始", event="problem_start")
+            # 任务数一旦达到 20 就立刻开启延迟模式；旧实现等全部入队后才设置，
+            # 前 20 个任务会以无限速的方式抢跑。
+            if not _delay_mode and len(pending_tasks) >= 20:
+                _set_delay_mode()
+            f = pool.submit(solve_one, problem_url, jar, submit, cid, not args.no_accum)
+            pending_tasks.append((f, pid, title))
+
         for url, info in contests_info:
             title = info.get("title_prefix") or info.get("contest_id") or info.get("training_id", "?")
             base, domain = info["base_url"], info["domain_id"]
             if info["type"] == "problem":
-                pids = info["pids"]
-                for pid in pids:
-                    if not args.force and has_existing_solution(s, base, domain, pid, user_id):
-                        log.info("  #%s — 已有题解，跳过", pid)
-                        if not os.environ.get("OJ_REQUESTER"):
-                            _push(f"⏭️ #{pid} 跳过(已有题解)", event="problem_skip")
-                        continue
-                    problem_url = f"{base}/d/{domain}/p/{pid}"
-                    if not _has_testdata(s, base, domain, pid):
-                        if cfg.auto_supplement_testdata:
-                            _run_supplement(problem_url)
-                        else:
-                            _no_data_skips.append(pid)
-                            continue
-                    _push(f"🔄 #{pid} 开始", event="problem_start")
-                    f = pool.submit(solve_one, problem_url, jar, submit, "", not args.no_accum)
-                    pending_tasks.append((f, pid, title))
+                for pid in info["pids"]:
+                    enqueue(base, domain, pid, title)
             elif info["type"] == "training":
                 # 训练：/d/{domain}/training/{id} 或 /training/{id}（system 域）
                 api_url = f"{base}/d/{domain}/training/{info['training_id']}" if domain != "system" else url
@@ -200,21 +228,7 @@ def main():
                 pids = data.get("pids", [])
                 log.info("[+] 训练: %s, pids=%s", title, pids)
                 for pid in pids:
-                    if not args.force and has_existing_solution(s, base, domain, pid, user_id):
-                        log.info("  #%s — 已有题解，跳过", pid)
-                        if not os.environ.get("OJ_REQUESTER"):
-                            _push(f"⏭️ #{pid} 跳过(已有题解)", event="problem_skip")
-                        continue
-                    problem_url = f"{base}/d/{domain}/p/{pid}"
-                    if not _has_testdata(s, base, domain, pid):
-                        if cfg.auto_supplement_testdata:
-                            _run_supplement(problem_url)
-                        else:
-                            _no_data_skips.append(pid)
-                            continue
-                    _push(f"🔄 #{pid} 开始", event="problem_start")
-                    f = pool.submit(solve_one, problem_url, jar, submit, "", not args.no_accum)
-                    pending_tasks.append((f, pid, title))
+                    enqueue(base, domain, pid, title)
             else:
                 # 比赛：先参加+获取pids，再提交任务
                 attend_contest(s, base, domain, info["contest_id"])
@@ -226,28 +240,11 @@ def main():
                 pids = tdoc.get("pids", [])
                 cid = info["contest_id"]
                 for pid in pids:
-                    if not args.force and has_existing_solution(s, base, domain, pid, user_id):
-                        log.info("  #%s — 已有题解，跳过", pid)
-                        continue
-                    problem_url = f"{base}/d/{domain}/p/{pid}"
-                    # 检查无测试数据
-                    if not _has_testdata(s, base, domain, pid):
-                        if cfg.auto_supplement_testdata:
-                            log.info("  #%s — 无测试数据，自动补充 ...", pid)
-                            _run_supplement(problem_url)
-                        else:
-                            log.info("  #%s — 无测试数据，跳过（不标记比赛失败）", pid)
-                            _no_data_skips.append(pid)
-                            continue
-                    f = pool.submit(solve_one, problem_url, jar, submit, cid, not args.no_accum)
-                    pending_tasks.append((f, pid, title))
+                    enqueue(base, domain, pid, title, cid)
 
-    # 延迟模式：>=20 题时开启，同服务请求至少间隔 2s
-    global _delay_mode
-    _delay_mode = len(pending_tasks) >= 20
-    if _delay_mode:
-        log.info("[!] 延迟模式已开启 (≥20题)，同服务请求间隔 ≥2s")
-        os.environ["OJ_DELAY_MODE"] = "1"
+    # 延迟模式兜底：入队过程中可能已提前开启，这里再确认一次
+    if len(pending_tasks) >= 20:
+        _set_delay_mode()
     log.info("[*] 已提交 %d 个任务，%d 线程并行处理中...", len(pending_tasks), args.workers)
     requester = int(os.environ.get("OJ_REQUESTER", 0))
     results = {}

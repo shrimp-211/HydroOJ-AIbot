@@ -215,10 +215,14 @@
   "_msg_interval": "私信轮询间隔（秒），频率过高可能导致 API 限流",
   "_msg_blocked_cmds": "禁止通过私信执行的命令列表，仅控制台可用",
   "password": "",
-  "ai_api_key": "sk-e3ebf9f83db34558871951d95ca2c708",
+  "ai_api_key": "AI_API_KEY",
   "benchmark_users": [
     2
   ],
   "ai_vision_model": "deepseek-v4-flash-vision-exp",
-  "max_problem_images": 4
+  "max_problem_images": 4,
+  "difficulty_detect_enable": true,
+  "_difficulty_detect_enable": "是否调用 AI 判断题目难度并据此选择模型层级。false=跳过这次调用，改用 difficulty_skip_model（可用 --no-difficulty-detect 临时关闭）",
+  "difficulty_skip_model": "",
+  "_difficulty_skip_model": "关闭难度判断时使用的模型名（须与 models 段 key 一致）。留空=沿用 model_router 的首个层级；填了 model_router 分层中的模型则从该层开始（保留升级顺序），填其它模型则本次只使用该模型"
 }
