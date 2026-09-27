@@ -219,45 +219,77 @@ Phase 2: 三层循环
 
 ---
 
-## Agent 求解（本地验证后再提交）
+## 求解流程：多候选思路 + 反馈闭环
 
-默认开启。与原流程的区别是：**代码先在本地通过验证，才会提交到 OJ**。
+默认开启。**解题与写题解是两个独立阶段**，各自有独立的流程与校验。
+
+### 解题阶段
 
 ```
-Agent: 出方案 → 写代码 → 本地编译 → 跑题面样例 → 随机对拍 → 才提交 OJ
-         ↑______________ 失败则带着具体报错/diff/反例回炉 ______________|
-```
+每条层级下尝试 N 条互相独立的思路：
 
-具体能力：
+  思路① 出方案 → 写代码 → 本地编译 → 跑样例 → 随机对拍 → 提交评测
+                                  ↑             ↑          ↓
+                          编译报错/样例 diff    对拍反例    评测反馈
+                                  └──── 带着反馈重写（R 次）────┘
+  思路② 换一个算法角度（不是改上一版代码）→ 同上
+  思路③ …
+
+  全部结束后：AC 优先，其次取得分最高的那一版用于写题解
+```
 
 | 环节 | 作用 |
 |------|------|
-| 方案先行 | 先让模型分析问题、定算法、列边界清单，再写代码（`agent_plan`） |
-| 本地编译 | 编译错误（CE）在本地发现，不占用提交次数、不用等评测队列 |
-| 样例校验 | 样例不过时回喂**精确 diff**（输入/期望/实际），比 OJ 一句 WA 有用得多 |
-| 随机对拍 | 让模型额外给出暴力解 + 数据生成器，本地对拍，提交前抓出边界 WA（self-hack） |
-| 结构化记忆 | 每轮失败写入日志（试过什么、错在哪），后续修正不再重复同一条死路 |
-| 预算控制 | 轮次 / 提交次数 / 总时长 / 费用四重上限，达到即停 |
+| 多候选思路 | `solve_candidates` 条**独立**思路；第 2 条起明确要求换算法（不同数据结构 / 不同转化 / 正难则反），避免在错误思路上打补丁 |
+| 方案先行 | 先分析问题、定算法、列边界清单，再写代码（`agent_plan` / `agent_alternative_plan`） |
+| 本地编译 | 编译错误立刻可见，并能把编译器原文回喂（而不是等评测返回一句 CE） |
+| 样例校验 | 回喂**精确 diff**（输入 / 期望 / 实际），定位比 OJ 的「WA」快得多 |
+| 随机对拍 | 额外要一份暴力解 + 数据生成器，本地对拍抓出边界错误（self-hack） |
+| 评测反馈闭环 | 提交后的得分与用例分布继续回喂，作为该思路的修正依据 |
+| 结构化记忆 | 每轮失败写入 journal，后续思路与修正都能看到「试过什么、错在哪」 |
+| 预算控制 | 思路数 / 轮次 / 提交次数 / 总时长 / 费用多重上限，只用于防止失控 |
 
-配置（`config.json`）：
+### 题解产出阶段（AC 之后）
+
+不再直接发布求解时的原始输出，而是按固定结构重写一篇题解：
+
+```
+AC 代码 + 题目 + 评测数据 + 求解时的踩坑记录
+   → 题意 / 思路 / 正确性说明 / 复杂度分析 / 实现要点与易错点 / 代码
+   → 发布前校验（代码块必须与 AC 代码逐字一致、公式配对、结构完整、无对话痕迹）
+   → 未通过则定向修复（只改被指出的问题，最多 editorial_fix_rounds 轮）
+```
+
+- **代码一致性是确定性保证**：正文里的代码块会被强制同步成真正 AC 的代码，不依赖模型自觉
+- **易错点来自真实经历**：求解过程中踩过的坑（编译错误 / 样例 WA / 对拍反例）会作为素材写进「实现要点与易错点」
+- **可以指定更强的模型写题解**：`editorial_model`（留空则沿用求解模型）
+
+### 配置
 
 ```json
 {
   "agent_enabled": true,
-  "agent_max_steps": 6,
-  "agent_max_submissions": 4,
+  "solve_candidates": 3,
+  "solve_repairs": 2,
+  "agent_max_steps": 12,
+  "agent_max_submissions": 8,
   "agent_max_seconds": 900,
   "agent_stress_enable": true,
   "agent_stress_rounds": 30,
-  "agent_run_timeout": 10
+  "agent_run_timeout": 10,
+  "editorial_enable": true,
+  "editorial_model": "",
+  "editorial_fix_rounds": 2
 }
 ```
 
-命令行：`--no-agent`（关闭）、`--agent-steps N`、`--no-stress`（只做编译+样例）。
-环境变量：`OJ_AGENT_ENABLE` / `OJ_AGENT_MAX_STEPS` / `OJ_AGENT_STRESS`。
+命令行：`--no-agent`（关闭本地验证，回到原三层循环）、`--agent-steps N`、
+`--no-stress`（只做编译+样例）。环境变量：`OJ_AGENT_ENABLE` / `OJ_AGENT_MAX_STEPS` /
+`OJ_AGENT_STRESS` / `OJ_SOLVE_CANDIDATES` / `OJ_SOLVE_REPAIRS` / `OJ_EDITORIAL_ENABLE` /
+`OJ_EDITORIAL_MODEL`。
 
 依赖与降级：C++ 需要本机有 `g++`/`clang++`（Python 题用 `python3`）。**检测不到工具链时会
-自动回退到原来的三层循环**，不会因为缺编译器而报错。
+自动回退到原来的三层循环**，题解产出流程不受影响（仍会重写题解）。
 
 > ⚠️ 安全提示：本地验证会执行 AI 生成的代码。已限制单次运行超时、输出大小，
 > POSIX 下还会限制地址空间/CPU 时间并在超时后杀进程组，但这**不是真正的沙箱**。
@@ -292,10 +324,11 @@ Agent: 出方案 → 写代码 → 本地编译 → 跑题面样例 → 随机�
 ## 测试
 
 ```bash
-python -m pytest -q                 # 132 个单元测试
+python -m pytest -q                 # 154 个单元测试
 python -m pytest test_core.py -q    # 仅核心逻辑（33 个）
 python -m pytest test_optimizations.py -q   # 仅优化项回归（53 个）
-python -m pytest test_agent.py -q   # 仅 agent 求解层（36 个，缺 g++ 时自动跳过编译相关用例）
+python -m pytest test_agent.py -q   # 仅 agent 求解层（39 个，缺 g++ 时自动跳过编译相关用例）
+python -m pytest test_editorial.py -q       # 仅题解产出管线（22 个）
 ```
 
 ---

@@ -121,6 +121,75 @@ DEFAULT_PROMPTS = {
 ```gen
 （数据生成器完整代码）
 ```""",
+
+    # ── 候选解法多样化：第二条思路必须真的换算法，而不是改改上一版 ──
+    "agent_alternative_plan": """上一版思路没能通过评测，请**换一个不同的算法角度**重新分析。
+
+## 题目
+{title}
+
+{content}
+
+时限 {time_limit}，内存 {memory_limit}
+
+## 已经试过的思路（不要重复）
+{journal}
+
+## 要求
+1. 明确说明**为什么上一版不可行**（复杂度、边界、正确性）
+2. 给出一个**根本不同**的算法：不同数据结构 / 不同转化 / 正难则反 / 不同复杂度级别
+3. 写出新算法的复杂度与边界清单
+4. 只输出方案，不要写代码""",
+
+    # ── 题解产出 ──
+    "editorial_system": "你是算法竞赛讲师，负责把已经通过评测的解法写成高质量中文题解。你的读者是没做过这道题的人：要先讲清题意与思路来源，再给证明与复杂度。数学符号一律用 $...$ 包裹。",
+    "editorial_write": """根据一份**已经通过评测**的代码，写一篇可以直接发布的题解。
+
+## 题目
+{title}
+
+{content}
+
+时限 {time_limit}，内存 {memory_limit}
+
+## 通过评测的代码（必须原样出现在题解里）
+```{ext}
+{code}
+```
+
+## 评测信息
+得分 {score}｜用时 {time_ms}ms｜内存 {memory_kb}KB｜难度 {difficulty} 级｜标签：{tags}
+
+## 求解过程中踩过的坑（写进「易错点」会更有说服力）
+{journal}
+
+## 写作要求
+1. 用二级标题组织，顺序固定：
+   `## 题意` / `## 思路` / `## 正确性说明` / `## 复杂度分析` / `## 实现要点与易错点` / `## 代码`
+2. 「思路」要讲**怎么想到的**：从暴力做法出发，说明哪里不够、怎么改进到最终算法
+3. 「正确性说明」给出关键不变量或归纳依据，不要写「显然」「易证」
+4. 「复杂度分析」给出时间与空间的式子（用 $O(...)$），并与题目限制对照
+5. 「实现要点与易错点」结合上面的踩坑记录，写清容易写错的地方（边界、溢出、初始化、输出格式）
+6. 代码块必须与上面给出的代码**逐字一致**：不要改写、不要精简、不要加注释、不要换语言标记
+7. 数学符号统一用 $...$，禁止裸写 \\le、\\sum、\\frac 等命令
+8. 直接输出题解正文，不要出现「好的」「以下是」「希望对你有帮助」这类口气""",
+    "editorial_fix": """这篇题解没有通过发布前检查，请**只针对下列问题**修改，其余内容保持原样。
+
+## 需要修正的问题
+{issues}
+
+## 当前题解
+{draft}
+
+## 必须原样保留的代码（与 AC 代码逐字一致）
+```{ext}
+{code}
+```
+
+## 要求
+1. 逐条解决上面的问题，不要重写无关段落
+2. 仍然保持六个二级标题的结构：题意 / 思路 / 正确性说明 / 复杂度分析 / 实现要点与易错点 / 代码
+3. 输出完整的修正后题解""",
 }
 
 
@@ -1111,6 +1180,7 @@ class SolverOrchestrator:
         difficulty = 0  # 0=未判断, 1-8 (8级制)
         candidate_tags = []  # 初步筛选的候选标签（难度评定，供 AI 参考，不出现在题解中）
         final_tags = []      # AI 最终选定的标签（二次筛选，出现在题解中）
+        journal: list = []   # 求解过程记录（失败原因/换过哪些思路），写题解时作为素材
         MID_RETRIES = 2   # 中层默认：重试解题次数（flash 层仅 1 次）
         INNER_RETRIES = 2  # 内层：按错误修正次数
 
@@ -1279,6 +1349,9 @@ class SolverOrchestrator:
                         problem, model=route_model, effort=route_thinking,
                         difficulty=difficulty, candidate_tags=candidate_tags,
                         submit=submit, use_stream=use_stream, contest_id=contest_id)
+                    journal.extend(outcome.ideas and
+                                   [f"思路：{x}" for x in outcome.ideas] or [])
+                    journal.extend(outcome.journal)
                     for k in ("input", "output", "total", "cache_hit"):
                         total_usage[k] = total_usage.get(k, 0) + outcome.usage.get(k, 0)
                     total_cost += outcome.cost
@@ -1433,6 +1506,15 @@ class SolverOrchestrator:
             else:
                 log.warning("[-] 混淆失败，使用原始代码")
 
+        # ═══ 题解产出：AC 之后单独写一篇结构化题解 ═══
+        # 求解输出里混着试错过程与口语，不适合直接发布；这里以「已通过评测的代码」
+        # 为准重写题解，并在发布前做结构与代码一致性校验。
+        if post and is_ac and code:
+            solution_md = self._write_editorial(
+                problem, code, final_verdict, difficulty, candidate_tags,
+                solution_md, used_model, used_effort, journal,
+                time_limit=problem.get("time_limit", ""))
+
         if post and solution_md:
             # 插入难度标签
             if difficulty > 0:
@@ -1486,6 +1568,34 @@ class SolverOrchestrator:
                 "total_elapsed": total_elapsed, "is_ac": is_ac, "pid": pid,
                 "model": used_model,
                 "is_cost_capped": is_cost_capped}
+
+    def _write_editorial(self, problem: dict, code: str, verdict: dict | None,
+                         difficulty: int, tags: list, fallback_md: str,
+                         used_model: str, used_effort: str, journal: list,
+                         time_limit: str = "") -> str:
+        """AC 之后重写题解：结构固定、代码与 AC 版本逐字一致。
+
+        与原行为的关系：求解时模型的输出（含试错过程）只作为兜底；
+        写题解失败时仍然照旧发布它，不会因为新流程失败而丢失题解。
+        """
+        if not self.config.get("editorial_enable", True):
+            return fallback_md
+        try:
+            from editorial import EditorialWriter
+        except ImportError as e:
+            log.warning("[题解] 模块加载失败，使用求解时的原始输出: %s", e)
+            return fallback_md
+        model = (self.config.get("editorial_model") or "").strip() or used_model
+        effort = used_effort if model == used_model else ""
+        log.info("[题解] 生成结构化题解（模型=%s）...", model or self.config["ai_model"])
+        try:
+            md = EditorialWriter(self.ai, self.config).write(
+                problem, code, verdict=verdict, difficulty=difficulty, tags=tags,
+                journal=journal, model=model, effort=effort, fallback=fallback_md)
+        except Exception as e:
+            log.warning("[题解] 生成异常，使用求解时的原始输出: %s", e)
+            return fallback_md
+        return md or fallback_md
 
     def _build_agent(self, pid: str, contest_id: str, accum_enabled: bool,
                      accum_base: float, session_cost):

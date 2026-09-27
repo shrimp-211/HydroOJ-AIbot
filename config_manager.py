@@ -39,6 +39,13 @@ FIELD_TO_JSON = {
     "agent_stress_enable": "agent_stress_enable",
     "agent_stress_rounds": "agent_stress_rounds",
     "agent_run_timeout": "agent_run_timeout",
+    # 求解策略：多条独立思路 + 每条修正次数
+    "solve_candidates": "solve_candidates",
+    "solve_repairs": "solve_repairs",
+    # 题解产出
+    "editorial_enable": "editorial_enable",
+    "editorial_model": "editorial_model",
+    "editorial_fix_rounds": "editorial_fix_rounds",
     # 代码 / 运行时
     "lang": "code_lang",
     "verify_timeout": "verify_timeout",
@@ -89,12 +96,19 @@ class AppConfig:
     difficulty_skip_model: str = ""  # 关闭难度判断时使用的模型（空=沿用分层默认）
     # Agent 求解：先本地编译/跑样例/随机对拍，通过后再提交 OJ
     agent_enabled: bool = True
-    agent_max_steps: int = 6           # 单题最多几轮「方案 → 实现 → 修正」
-    agent_max_submissions: int = 4     # 单题最多提交几次
+    agent_max_steps: int = 12          # 单题最多几轮「方案 → 实现 → 修正」
+    agent_max_submissions: int = 8     # 单题最多提交几次（不为省提交而牺牲正确率）
     agent_max_seconds: int = 900       # 单题 agent 总时长上限（秒）
     agent_stress_enable: bool = True   # 是否用暴力解做随机对拍
     agent_stress_rounds: int = 30      # 对拍轮数
     agent_run_timeout: int = 10        # 单次本地运行超时（秒）
+    # 求解策略：多条互相独立的思路（换算法，而不是改上一版）
+    solve_candidates: int = 3          # 每个层级尝试几条独立思路
+    solve_repairs: int = 2             # 每条思路最多修正几次
+    # 题解产出：AC 之后单独写一篇结构化题解（而不是直接发布求解输出）
+    editorial_enable: bool = True
+    editorial_model: str = ""          # 写题解用的模型（空=沿用求解模型）
+    editorial_fix_rounds: int = 2      # 校验不通过时的定向修复轮数
     # Code
     lang: str = "cc.cc14o2"
     # Runtime
@@ -249,6 +263,10 @@ class ConfigManager:
                 "agent_enabled": ["OJ_AGENT_ENABLE", "AGENT_ENABLE"],
                 "agent_max_steps": ["OJ_AGENT_MAX_STEPS"],
                 "agent_stress_enable": ["OJ_AGENT_STRESS", "AGENT_STRESS"],
+                "solve_candidates": ["OJ_SOLVE_CANDIDATES"],
+                "solve_repairs": ["OJ_SOLVE_REPAIRS"],
+                "editorial_enable": ["OJ_EDITORIAL_ENABLE"],
+                "editorial_model": ["OJ_EDITORIAL_MODEL"],
                 "lang": ["OJ_LANG"],
                 "verify_timeout": ["OJ_VERIFY_TIMEOUT", "VERIFY_TIMEOUT"],
             }

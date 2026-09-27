@@ -58,6 +58,10 @@ class AttemptOutcome:
     local_runs: int = 0       # 本地跑过的样例/对拍次数
     submissions: int = 0      # 实际提交 OJ 次数
     stress_rounds: int = 0    # 对拍轮数
+    candidates_tried: int = 0 # 尝试过的独立思路条数
+    repairs: int = 0          # 因失败而重写的次数
+    ideas: list = field(default_factory=list)   # 每条思路的简述（写题解时用作「易错点」素材）
+    best_score: int = -1      # 未 AC 时的最高得分
     is_cost_capped: bool = False
     journal: list = field(default_factory=list)
     last_check_text: str = ""  # 最近一次本地检查的可读报告（回喂给模型）
@@ -100,7 +104,15 @@ class SolverAgent:
                 candidate_tags: list | None = None, submit: bool = True,
                 use_stream: bool = False, contest_id: str = "",
                 max_steps: int | None = None, stress_enable: bool = True,
-                stress_rounds: int = 30, plan_enable: bool = True) -> AttemptOutcome:
+                stress_rounds: int = 30, plan_enable: bool = True,
+                candidates: int | None = None,
+                repairs: int | None = None) -> AttemptOutcome:
+        """一次求解战役：多条**互相独立**的思路，各自验证/修正，取最好的结果。
+
+        与单线迭代的区别：候选 2 必须是「换算法」，不是「改上一版」。单线迭代一旦
+        思路错了就只能在错误方向上打补丁；多候选能在不同算法之间取舍，这也是正确率
+        提升最明显的部分。
+        """
         t0 = time.monotonic()
         out = AttemptOutcome(model=model, effort=effort)
 
@@ -109,103 +121,151 @@ class SolverAgent:
             return self._fallback_single_shot(problem, out, model, effort, submit,
                                               use_stream, contest_id)
 
-        steps_limit = int(max_steps or self.config.get("agent_max_steps", 6) or 6)
-        submit_limit = int(self.config.get("agent_max_submissions", 4) or 4)
+        n_cand = max(1, int(candidates or self.config.get("solve_candidates", 3) or 1))
+        n_repair = max(0, int(repairs if repairs is not None
+                              else self.config.get("solve_repairs", 2) or 0))
+        steps_limit = int(max_steps or self.config.get("agent_max_steps", 12) or 12)
+        submit_limit = int(self.config.get("agent_max_submissions", 8) or 8)
         deadline = t0 + float(self.config.get("agent_max_seconds", 900) or 900)
         samples = extract_samples(problem.get("content", ""))
         time_limit = parse_time_limit(problem.get("time_limit", ""), 1.0)
         run_timeout = max(2.0, min(float(self.config.get("agent_run_timeout", 10) or 10),
                                    time_limit * 5 + 2))
 
-        log.info("[Agent] 求解循环启动 | %s | 样例 %d 组 | 时限 %.1fs | 上限 %d 步 / %d 次提交",
-                 self.judge.describe(), len(samples), time_limit, steps_limit, submit_limit)
+        log.info("[Agent] 求解战役启动 | %s | 样例 %d 组 | 时限 %.1fs | "
+                 "%d 条思路 × 每条最多 %d 次修正 | 上限 %d 步 / %d 次提交",
+                 self.judge.describe(), len(samples), time_limit,
+                 n_cand, n_repair + 1, steps_limit, submit_limit)
 
-        plan = self._plan(problem, model, effort, out) if plan_enable else ""
-        code, solution_md = "", ""
+        best: dict | None = None       # 未 AC 时保留得分最高的版本
 
-        while out.steps < steps_limit and not out.is_ac:
-            if time.monotonic() > deadline:
-                log.warning("[Agent] 达到总时间上限，停止")
-                out.journal.append("达到总时间上限")
+        for ci in range(n_cand):
+            if out.is_ac or out.steps >= steps_limit or time.monotonic() > deadline:
                 break
             if self.cost_exceeded():
                 out.is_cost_capped = True
                 out.journal.append("费用达到上限")
                 break
-            out.steps += 1
 
-            # 1) 出代码（首轮按方案实现，之后带着反馈修正）
-            code, solution_md = self._write_code(
-                problem, plan, out, model, effort, use_stream=use_stream)
-            if not code:
-                out.journal.append(f"第{out.steps}轮：模型未给出代码块")
-                continue
-            out.code, out.solution_md = code, solution_md
+            idea = self._idea(problem, ci, out, model, effort, plan_enable)
+            if ci == 0 and not idea:
+                idea = ""     # 没有方案提示词时按常规实现
+            out.candidates_tried += 1
+            out.ideas.append(_summarize_idea(idea))
+            log.info("[Agent] 第 %d/%d 条思路：%s", ci + 1, n_cand, out.ideas[-1])
 
-            # 2) 本地验证：编译 + 样例
-            check = (self.judge.check_samples(code, samples, timeout=run_timeout)
-                     if samples else _compile_only(self.judge, code))
-            out.local_runs += len(check.cases) or 1
-            if not check.compile_ok:
-                log.info("[Agent] 本地编译失败 → 不提交，回喂编译器报错")
-                out.last_check_text = check.to_prompt()
+            feedback = ""
+            for ri in range(n_repair + 1):
+                if out.steps >= steps_limit or time.monotonic() > deadline:
+                    break
+                if self.cost_exceeded():
+                    out.is_cost_capped = True
+                    break
+                out.steps += 1
+                fresh = (ri == 0)
+                code, solution_md = self._produce_code(
+                    problem, idea, out, model, effort, feedback=feedback,
+                    fresh=fresh, use_stream=use_stream)
+                if not code:
+                    out.journal.append(f"第{out.steps}轮：模型未给出代码块")
+                    break
+                out.code, out.solution_md = code, solution_md
+
+                # ── 本地验证：编译 → 样例 → 对拍（目的是定位错误，不是为了省提交）──
+                check = (self.judge.check_samples(code, samples, timeout=run_timeout)
+                         if samples else _compile_only(self.judge, code))
+                out.local_runs += len(check.cases) or 1
+                if not check.compile_ok:
+                    log.info("[Agent] 本地编译失败，带着报错重写")
+                    feedback = check.to_prompt()
+                    out.last_check_text = feedback
+                    out.journal.append(
+                        f"第{out.steps}轮：本地编译失败\n{check.compile_message[:500]}")
+                    out.repairs += 1
+                    continue
+                if check.sample_failures:
+                    bad = check.sample_failures[0]
+                    log.info("[Agent] 样例 %d %s，带着具体差异重写", bad.n, bad.status)
+                    feedback = check.to_prompt()
+                    out.last_check_text = feedback
+                    out.journal.append(f"第{out.steps}轮：样例 {bad.n} {bad.status}")
+                    out.repairs += 1
+                    continue
+                log.info("[Agent] 本地样例通过（%d 组）", len(check.cases))
+
+                if stress_enable and samples:
+                    stress = self._stress(problem, code, out, stress_rounds, run_timeout)
+                    if stress is not None:
+                        out.stress_rounds = max(out.stress_rounds, stress.rounds)
+                        if stress.counterexample:
+                            log.info("[Agent] 对拍发现反例，带着反例重写：%s", stress.detail)
+                            check.stress = stress
+                            feedback = check.to_prompt()
+                            out.last_check_text = feedback
+                            out.journal.append(f"第{out.steps}轮：对拍反例（{stress.detail}）")
+                            out.repairs += 1
+                            continue
+                        log.info("[Agent] 对拍通过 %d 轮", stress.rounds)
+
+                # ── 交评测（OJ 反馈是最权威的正确性信号）──
+                if not submit or out.submissions >= submit_limit:
+                    log.info("[Agent] 停止提交（submit=%s，已提交 %d 次）", submit, out.submissions)
+                    best = self._better(best, code, solution_md, out.verdict)
+                    break
+                verdict = self._submit_and_judge(code, out)
+                if verdict is None:
+                    out.journal.append(f"第{out.steps}轮：提交或评测无结果")
+                    break
+                best = self._better(best, code, solution_md, verdict)
+                if verdict.get("is_ac"):
+                    out.is_ac = True
+                    log.info("[Agent] AC：第 %d 条思路、第 %d 次尝试（共 %d 轮）",
+                             ci + 1, ri + 1, out.steps)
+                    break
+                if verdict.get("is_system_error"):
+                    log.warning("[Agent] 疑似评测机故障，原样重交")
+                    out.journal.append(f"第{out.steps}轮：评测机故障，代码重交")
+                    out.steps -= 1          # 重交不计入修正轮次
+                    continue
+                log.info("[Agent] 评测得分 %s，带着评测反馈重写",
+                         verdict.get("score", 0))
+                feedback = self._feedback_text(out)
                 out.journal.append(
-                    f"第{out.steps}轮：本地编译失败\n{check.compile_message[:500]}")
-                continue
-            if check.sample_failures:
-                bad = check.sample_failures[0]
-                log.info("[Agent] 样例 %d %s → 不提交，回喂具体差异", bad.n, bad.status)
-                out.last_check_text = check.to_prompt()
-                out.journal.append(f"第{out.steps}轮：样例 {bad.n} {bad.status}")
-                continue
-            log.info("[Agent] 本地样例通过（%d 组）", len(check.cases))
+                    f"第{out.steps}轮：评测得分 {verdict.get('score', 0)}，"
+                    f"{str(verdict.get('case_summary', ''))[:120]}")
+                out.repairs += 1
 
-            # 3) 随机对拍（self-hack）
-            if stress_enable and samples:
-                stress = self._stress(problem, code, out, stress_rounds, run_timeout)
-                if stress is not None:
-                    out.stress_rounds = max(out.stress_rounds, stress.rounds)
-                    if stress.counterexample:
-                        log.info("[Agent] 对拍发现反例 → 不提交：%s", stress.detail)
-                        check.stress = stress
-                        out.last_check_text = check.to_prompt()
-                        out.journal.append(f"第{out.steps}轮：对拍反例（{stress.detail}）")
-                        continue
-                    log.info("[Agent] 对拍通过 %d 轮", stress.rounds)
-
-            # 4) 提交 OJ
-            if not submit or out.submissions >= submit_limit:
-                log.info("[Agent] 不再提交（submit=%s，已提交 %d 次）", submit, out.submissions)
-                break
-            verdict = self._submit_and_judge(code, out)
-            if verdict is None:
-                out.journal.append(f"第{out.steps}轮：提交或评测无结果")
-                break
-            if verdict.get("is_ac"):
-                out.is_ac = True
-                log.info("[Agent] AC！共 %d 轮，本地拦下 %d 次失败提交",
-                         out.steps, out.local_saves)
-                break
-            if verdict.get("is_system_error"):
-                log.warning("[Agent] 疑似评测机故障，原样重交")
-                out.journal.append(f"第{out.steps}轮：评测机故障，代码重交")
-                continue
-            out.journal.append(
-                f"第{out.steps}轮：评测得分 {verdict.get('score', 0)}，"
-                f"{str(verdict.get('case_summary', ''))[:120]}")
-
-        # 5) 兜底：全程被本地检查拦下（一次都没提交）时，最后再交一次，
-        #    避免出现「看起来跑完但 OJ 上什么都没有」的情况
+        # 兜底：全程被本地检查拦下（一次都没提交）时最后再交一次，
+        # 避免出现「看起来跑完但 OJ 上什么都没有」的情况
         if (not out.is_ac and not out.verdicts and submit and out.code
                 and out.submissions < submit_limit):
             log.info("[Agent] 本地反复失败，兜底提交最后一版代码")
             out.verdict = self._submit_and_judge(out.code, out)
             out.is_ac = bool(out.verdict and out.verdict.get("is_ac"))
+            if out.verdict:
+                best = self._better(best, out.code, out.solution_md, out.verdict)
+
+        # 未 AC：交付得分最高的那一版（题解仍按它来写）
+        if not out.is_ac and best:
+            out.code, out.solution_md, out.verdict = best["code"], best["md"], best["verdict"]
+            out.best_score = best.get("score", 0)
 
         out.elapsed = time.monotonic() - t0
-        log.info("[Agent] 结束 | AC=%s | 轮次 %d | 提交 %d | 本地验证 %d 次 | 费用 ¥%.4f",
-                 out.is_ac, out.steps, out.submissions, out.local_runs, out.cost)
+        log.info("[Agent] 结束 | AC=%s | 思路 %d 条 | 轮次 %d（修正 %d）| 提交 %d | "
+                 "本地验证 %d 次 | 费用 ¥%.4f",
+                 out.is_ac, out.candidates_tried, out.steps, out.repairs,
+                 out.submissions, out.local_runs, out.cost)
         return out
+
+    @staticmethod
+    def _better(best: dict | None, code: str, md: str, verdict: dict | None) -> dict | None:
+        """保留得分最高的一版（AC 优先）。"""
+        if not code:
+            return best
+        score = int((verdict or {}).get("score", -1))
+        if best is None or score > best.get("score", -1):
+            return {"code": code, "md": md, "verdict": verdict, "score": score}
+        return best
 
     # ══════════════════════════════════════════════════════════
     # 内部实现
@@ -240,23 +300,41 @@ class SolverAgent:
             log.info("[Agent] 方案已生成（%d 字符）", len(plan))
         return plan
 
-    def _write_code(self, problem: dict, plan: str, out: AttemptOutcome, model: str,
-                    effort: str, *, use_stream: bool) -> tuple[str, str]:
+    def _idea(self, problem: dict, ci: int, out: AttemptOutcome, model: str,
+              effort: str, plan_enable: bool) -> str:
+        """第 ci 条候选思路：第一条用常规方案，后续要求「换一个算法角度」。"""
+        if ci == 0:
+            return self._plan(problem, model, effort, out) if plan_enable else ""
+        tpl = self.ai._p("agent_alternative_plan", "")
+        if not tpl:
+            return ""
+        prompt = tpl.format(title=problem.get("title", ""),
+                            content=problem.get("content", "")[:5000],
+                            time_limit=problem.get("time_limit", "?"),
+                            memory_limit=problem.get("memory_limit", "?"),
+                            journal=self._journal_text(out))
+        idea = self._call(prompt, model, effort, out)
+        return idea
+
+    def _produce_code(self, problem: dict, idea: str, out: AttemptOutcome, model: str,
+                      effort: str, *, feedback: str, fresh: bool,
+                      use_stream: bool) -> tuple[str, str]:
+        """按思路实现；已有反馈时改为带着反馈重写。"""
         ext = self.config.lang_ext
-        if out.steps <= 1:
+        if fresh:
             tpl = self.ai._p("agent_implement", "") or self.ai._p("generate", "")
             prompt = tpl.format(title=problem.get("title", ""),
                                 content=problem.get("content", ""),
-                                plan=plan or "（自行选择你认为正确的算法）",
+                                plan=idea or "（自行选择你认为正确的算法）",
                                 time_limit=problem.get("time_limit", "?"),
                                 memory_limit=problem.get("memory_limit", "?"), ext=ext)
         else:
             tpl = self.ai._p("agent_repair", "")
             prompt = tpl.format(title=problem.get("title", ""),
                                 content=problem.get("content", "")[:4000],
-                                plan=plan or "-",
+                                plan=idea or "-",
                                 code=out.code or "(尚未生成)",
-                                feedback=self._feedback_text(out),
+                                feedback=feedback or self._feedback_text(out),
                                 journal=self._journal_text(out), ext=ext)
         content = self._call(prompt, model, effort, out, use_stream=use_stream)
         if not content:
@@ -371,3 +449,11 @@ def _compile_only(judge: LocalJudge, code: str) -> CheckReport:
     """题面没有样例时，至少做一次编译检查（CE 是最常见的白交）。"""
     comp = judge.compile(code, tag="sol")
     return CheckReport(compile_ok=comp.ok, compile_message=comp.message)
+
+
+def _summarize_idea(idea: str) -> str:
+    """把方案压成一行，用于日志与题解素材。"""
+    text = " ".join((idea or "").split())
+    if not text:
+        return "（无方案，直接实现）"
+    return text[:80] + ("…" if len(text) > 80 else "")

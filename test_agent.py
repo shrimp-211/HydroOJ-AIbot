@@ -144,6 +144,8 @@ class _ScriptedAI(AIClient):
         self.codes = list(codes)
         self.brute, self.gen = brute, gen
         self.calls = []
+        self.chat_calls = []      # [(model, prompt)]
+        self.editorial = ""       # 题解生成时的返回（空则用通用占位）
         self._code_idx = 0
 
     def _call_ai(self, user_prompt, system_msg, use_stream=False, images=None,
@@ -159,15 +161,19 @@ class _ScriptedAI(AIClient):
     def chat(self, messages, model="", use_stream=False, max_tokens=0, effort=""):
         prompt = messages[-1]["content"]
         self.calls.append(prompt)
+        self.chat_calls.append((model, prompt))
         # 用各模板独有的开头判别调用类型（注意 implement/repair 会嵌入 plan 正文，
         # 不能拿 plan 里的内容当判别标记）
-        if "提供**暴力解**" in prompt:
+        if "写作要求" in prompt:                    # editorial_write
+            content = self.editorial or "## 题意\n占位\n## 代码\n```cpp\nx\n```"
+        elif "需要修正的问题" in prompt:            # editorial_fix
+            content = self.editorial or "## 题意\n占位\n"
+        elif "提供**暴力解**" in prompt:
             content = f"```brute\n{self.brute}\n```\n```gen\n{self.gen}\n```"
         elif "先分析题目，给出解题方案" in prompt:
             content = "问题本质：求和。算法：直接读入输出。"
-        elif "按方案写出完整代码" in prompt:
-            content = self.codes[0]
         else:
+            # 实现与修正都从这里取：按顺序给出下一份代码
             content = self.codes[min(self._code_idx, len(self.codes) - 1)]
             self._code_idx += 1
         return {"content": content,
@@ -347,15 +353,55 @@ class TestSolverAgent:
         assert out.is_ac
         assert not any("先分析题目，给出解题方案" in c for c in ai.calls)
 
+    # ── 多候选（换算法，而不是改上一版）──
+    def test_multiple_candidates_tried(self, tmp_path):
+        cfg = _cfg(tmp_path, solve_candidates=3, solve_repairs=0)
+        ai = _ScriptedAI(cfg, [GOOD])
+        submitted = []
+        agent = SolverAgent(
+            ai, cfg, _FakeJudge([_ce_report(), _ce_report(), _ok_report()]),
+            submit_fn=lambda c: (submitted.append(c), f"rid{len(submitted)}")[1],
+            judge_fn=lambda rid: _verdict(True))
+        out = agent.attempt(_problem(), model="m")
+        assert out.candidates_tried == 3 and out.is_ac
+        # 第 2、3 条思路必须要求「换一个不同的算法角度」
+        assert sum(1 for c in ai.calls if "换一个不同的算法角度" in c) == 2
+        assert len(out.ideas) == 3
+
+    def test_alternative_idea_sees_previous_failures(self, tmp_path):
+        cfg = _cfg(tmp_path, solve_candidates=2, solve_repairs=0)
+        ai = _ScriptedAI(cfg, [GOOD])
+        agent = SolverAgent(ai, cfg,
+                            _FakeJudge([_ce_report("boom: syntax error"), _ok_report()]),
+                            submit_fn=lambda c: "rid1", judge_fn=lambda rid: _verdict(True))
+        agent.attempt(_problem(), model="m")
+        alt = [c for c in ai.calls if "换一个不同的算法角度" in c][-1]
+        assert "boom: syntax error" in alt      # 上一轮的失败原因要带进新思路
+
+    def test_keeps_best_scoring_candidate(self, tmp_path):
+        cfg = _cfg(tmp_path, solve_candidates=2, solve_repairs=0)
+        ai = _ScriptedAI(cfg, [GOOD, BAD])      # 第一条 30 分，第二条 0 分
+        scores = [30, 0]
+        agent = SolverAgent(
+            ai, cfg, _FakeJudge([_ok_report(), _ok_report()]),
+            submit_fn=lambda c: "rid1",
+            judge_fn=lambda rid: _verdict(False, scores.pop(0)))
+        out = agent.attempt(_problem(), model="m")
+        assert not out.is_ac and out.best_score == 30
+        assert out.code.strip() == GOOD_CODE    # 保留得分更高的那一版
+
 
 class TestAgentConfig:
     def test_defaults(self, tmp_path):
         c = _cfg(tmp_path)
         assert c["agent_enabled"] is True
-        assert c["agent_max_steps"] == 6
-        assert c["agent_max_submissions"] == 4
+        assert c["agent_max_steps"] == 12
+        assert c["agent_max_submissions"] == 8
         assert c["agent_stress_enable"] is True
         assert c["agent_stress_rounds"] == 30
+        assert c["solve_candidates"] == 3
+        assert c["solve_repairs"] == 2
+        assert c["editorial_enable"] is True
 
     def test_env_override(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OJ_AGENT_ENABLE", "0")
