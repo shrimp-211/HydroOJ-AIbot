@@ -37,7 +37,7 @@ jobs:
           from pathlib import Path
           path = Path(os.environ['RUNNER_TEMP']) / 'docker-smoke.log'
           if path.exists():
-              tail = '\n'.join(path.read_text(errors='replace').splitlines()[-80:])
+              tail = '\n'.join(path.read_text(errors='replace').splitlines()[-80:])[-3500:]
               escaped = tail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               print(f'::error title=Container smoke test::{escaped}')
       - name: Container logs and cleanup
