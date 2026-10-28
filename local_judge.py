@@ -304,6 +304,8 @@ class LocalJudge:
                 status, detail = "TLE", f"运行超时（>{timeout or self.run_timeout}s）"
             elif r.exit_code != 0:
                 status, detail = "RE", f"退出码 {r.exit_code}"
+                if r.stderr:
+                    detail += ": " + _truncate(r.stderr, 500)
             else:
                 same, why = outputs_match(s.get("out", ""), r.stdout)
                 status, detail = ("AC", why) if same else ("WA", why)

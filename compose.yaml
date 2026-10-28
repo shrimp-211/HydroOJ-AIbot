@@ -9,7 +9,8 @@ x-runtime: &runtime
     - data:/data
   read_only: true
   tmpfs:
-    - /tmp:size=256m,mode=1777
+    # Local validation compiles and executes temporary C++ binaries.
+    - /tmp:rw,exec,nosuid,nodev,size=256m,mode=1777
   security_opt:
     - no-new-privileges:true
   cap_drop:

@@ -149,3 +149,14 @@ def test_auxiliary_tools_inherit_initialized_single_model(tmp_path, monkeypatch)
         assert tool.model == 'configured-model'
         assert tool.username == 'configured-user'
         tool.session.close()
+
+
+def test_local_execution_error_keeps_actionable_detail(tmp_path, monkeypatch):
+    from local_judge import LocalJudge, CompileResult, RunResult
+    judge = LocalJudge('cpp', workdir=str(tmp_path))
+    monkeypatch.setattr(judge, 'compile', lambda *a, **kw: CompileResult(True, exe='main'))
+    monkeypatch.setattr(judge, 'run', lambda *a, **kw: RunResult(
+        exit_code=127, stderr='Permission denied: executable is on a noexec mount'))
+    report = judge.check_samples('code', [{'in': '1', 'out': '1'}])
+    assert report.cases[0].status == 'RE'
+    assert 'noexec mount' in report.to_prompt()

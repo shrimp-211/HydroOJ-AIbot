@@ -143,6 +143,7 @@ docker run --rm --init --env-file .env -v hydrooj-data:/data hydrooj-aibot:local
 ### 数据、升级与备份
 
 - `/app`：镜像中的代码与提示词；升级镜像会更新它们。
+- `/tmp`：可执行的临时内存文件系统，供本地编译、样例验证和数据生成使用，容器停止后清空。
 - `/data`：命名卷，保存 `config.json`、费用统计、处理记录、Cookie、日志、本地验证目录和生成数据。
 - 宿主机 `.env`：由 Compose 注入环境变量，不会复制到镜像。变量优先于卷内 JSON 配置；修改后需要重新创建服务。
 
