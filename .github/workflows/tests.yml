@@ -27,21 +27,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build and verify the container
+        shell: bash
+        run: bash .github/scripts/docker-smoke.sh 2>&1 | tee "$RUNNER_TEMP/docker-smoke.log"
+      - name: Report container failure
+        if: failure()
+        shell: python
         run: |
-          printf 'OJ_USERNAME=smoke\nOJ_PASSWORD=smoke\nAI_API_KEY=sk-smoke-test\nWEBUI_AUTH_TOKEN=ci-test-token\n' > .env
-          docker compose config --quiet
-          docker compose build
-          docker compose run --rm cli init --model smoke --base-url https://example.invalid/v1 --oj-root https://oj.invalid --profile economy
-          docker compose run --rm cli doctor --json
-          docker compose run --rm cli python -c "import os, shutil; from pathlib import Path; assert shutil.which('g++'); assert os.getuid() == 10001; assert Path('/data/config.json').exists()"
-          docker compose run --rm cli python -m pytest -q /app/test_agent.py::TestLocalJudgeCpp
-          docker compose up -d web
-          curl --fail --retry 15 --retry-delay 2 --retry-connrefused http://127.0.0.1:5000/status
-          curl --fail -H 'X-Auth-Token: ci-test-token' -H 'Content-Type: application/json' -d '{"contest_start_page":3}' http://127.0.0.1:5000/config
-          docker compose run --rm cli python -c "from config_manager import ConfigManager; assert ConfigManager().contest_start_page == 3"
-          docker compose up -d --force-recreate web
-          curl --fail --retry 15 --retry-delay 2 --retry-connrefused -H 'X-Auth-Token: ci-test-token' http://127.0.0.1:5000/config/doctor
-          docker compose run --rm cli python -c "from config_manager import ConfigManager; assert ConfigManager().contest_start_page == 3"
+          import os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'docker-smoke.log'
+          if path.exists():
+              tail = '\n'.join(path.read_text(errors='replace').splitlines()[-80:])
+              escaped = tail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Container smoke test::{escaped}')
       - name: Container logs and cleanup
         if: always()
         run: |
