@@ -293,7 +293,7 @@ class TestPeakPricing:
         path = tmp_path / "config.json"
         path.write_text(json.dumps(cfg_data), encoding="utf-8")
         ai = AIClient(Config(config_path=str(path)))
-        monkeypatch.setattr("oj_solver.datetime", _FixedDatetime(3))
+        monkeypatch.setattr("ai_client.datetime", _FixedDatetime(3))
         cost = ai._calc_cost({"input": 1_000_000, "output": 0}, "m")
         assert cost == pytest.approx(10.0)
 
@@ -534,7 +534,7 @@ class TestSolveFlowOffline:
         monkeypatch.chdir(tmp_path)
         # 用仓库自带的 config.json 作为模型表（没有则退回默认值），
         # 工件（dashboard.json / cost_accum.json）则写在隔离的 tmp 目录里。
-        fixture = Path(__file__).with_name("config.json")
+        fixture = Path(__file__).with_name("config.example.json")
         # 这些用例覆盖的是原三层循环；agent 路径由 TestSolverAgent 单独覆盖
         overrides = {"agent_enabled": False}
         overrides.update(cli or {})
@@ -609,7 +609,7 @@ class TestDifficultyToggle:
         assert result["is_ac"] is True
         assert ai.difficulty_probes == []
         # 未指定专用模型 → 沿用分层首个模型
-        fixture = Path(__file__).with_name("config.json")
+        fixture = Path(__file__).with_name("config.example.json")
         from model_router import ModelRouter
         default_model = ModelRouter(Config(config_path=str(fixture))).default.model
         assert default_model in oj.submitted[-1]

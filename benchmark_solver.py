@@ -185,7 +185,7 @@ class BenchmarkSolver:
     # ── AI 解读代码 ──
     def _get_ai(self):
         if self._ai is None:
-            from oj_solver import AIClient
+            from ai_client import AIClient
             from config_manager import ConfigManager
             self._ai = AIClient(ConfigManager())
         return self._ai

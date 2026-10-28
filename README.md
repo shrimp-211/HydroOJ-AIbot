@@ -29,7 +29,7 @@
 
 ```bash
 # 安装依赖
-pip install openai requests python-dotenv
+pip install -r requirements.txt
 
 # 编辑 .env
 OJ_ROOT=https://your-oj-instance.com
@@ -348,3 +348,24 @@ python -m pytest test_editorial.py -q       # 仅题解产出管线（22 个）
 | `OJ_DELAY_MODE` | 延迟模式开关 (≥20题自动) |
 | `OJ_DIFFICULTY_DETECT` | 是否判断题目难度 (1/0，默认 1) |
 | `OJ_DIFFICULTY_SKIP_MODEL` | 关闭难度判断时使用的模型 |
+
+
+## AI 接口层（重构）
+
+`ai_client.py` 统一生成、修正、流式与普通对话；`ai_protocol.py` 负责协议参数与用量归一化。
+原来的 `from oj_solver import AIClient` 仍兼容。流式调用读取最后一个无 choices 的 usage 包；
+缓存命中仅按缓存价计费，不再同时按普通输入价重复计算。达到输出上限的残缺代码不会作为成功结果提交。
+
+模型配置支持以下可选项（均位于 `models.<模型名>`）：
+
+- `provider`: `auto` / `openai` / `deepseek` / `zhipu` / `compatible`。代理地址建议显式设置；
+  自动识别仅匹配官方主机名，未知兼容端点不附带专有推理参数。
+- `token_parameter`: `max_tokens` 或 `max_completion_tokens`，默认随 provider 选择。
+- `supports_reasoning_effort`: 是否传推理强度；不支持的模型设为 `false`。
+- `thinking`: `enabled` / `disabled`，控制 DeepSeek / 智谱风格的 thinking 字段。
+- `stream_usage`: 默认 `true`；不接受 `stream_options` 的网关可设为 `false`，此时可能无法统计流式费用。
+- `extra_body`: 网关扩展字段；不得覆盖模型、消息、流式开关或 token 上限。
+- `timeout` / `max_retries`: 默认 180 秒 / 2 次，交由 SDK 处理可重试错误。
+
+请求参数与流式用量处理依据 [Chat Completions 官方接口文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。
+模型能力、价格与输出限制需按实际服务配置；示例配置中的价格不是实时价格查询。

@@ -350,7 +350,7 @@ class SolverAgent:
     @staticmethod
     def _extract_solution_code(content: str, ext: str) -> str:
         # 复用主流程的围栏解析（含 ```C++ title=x、~~~ 等变体）
-        from oj_solver import AIClient
+        from ai_client import AIClient
         return AIClient._extract_code(content, ext)
 
     def _feedback_text(self, out: AttemptOutcome) -> str:

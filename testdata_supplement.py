@@ -65,7 +65,7 @@ class TestDataSupplement:
     # ── AI 客户端（懒加载，避免重复创建）──
     def _get_ai_client(self):
         if self._ai_client is None:
-            from oj_solver import AIClient
+            from ai_client import AIClient
             from config_manager import ConfigManager
             self._ai_client = AIClient(ConfigManager())
         return self._ai_client

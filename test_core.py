@@ -179,7 +179,7 @@ class TestModelConfig:
                      "AI_BASE_URL", "OJ_AI_MODEL", "AI_MODEL", "AI_API_KEY"]:
             monkeypatch.delenv(env, raising=False)
         from config_manager import ConfigManager
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         cfg = c.get_model_config("glm-5.2")
         assert cfg["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
         assert cfg["max_tokens"] == 128000
@@ -190,7 +190,7 @@ class TestModelConfig:
         for env in ["OJ_ROOT", "OJ_USERNAME", "OJ_PASSWORD", "DEEPSEEK_API_KEY"]:
             monkeypatch.delenv(env, raising=False)
         from config_manager import ConfigManager
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         cfg = c.get_model_config("deepseek-v4-pro")
         assert cfg["base_url"] == "https://api.deepseek.com"
         assert cfg["max_tokens"] == 384000
@@ -199,7 +199,7 @@ class TestModelConfig:
     def test_pricing_peaks(self):
         """多峰值 pricing 读取"""
         from config_manager import ConfigManager
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         p = c.get_model_pricing("deepseek-v4-pro")
         assert p["input"] == 3.0
         assert p["output"] == 6.0
@@ -210,7 +210,7 @@ class TestModelConfig:
     def test_pricing_no_peaks(self):
         """无峰值模型 pricing"""
         from config_manager import ConfigManager
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         p = c.get_model_pricing("glm-5.2")
         assert p["input"] == 8.0
         assert p["output"] == 28.0
@@ -220,7 +220,7 @@ class TestModelConfig:
     def test_nonexistent_model_fallback(self):
         """不存在的模型降级到全局默认"""
         from config_manager import ConfigManager
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         cfg = c.get_model_config("no-such-model")
         assert cfg["base_url"] == c["ai_base_url"]
         assert cfg["max_tokens"] == c["ai_max_tokens"]
@@ -229,7 +229,7 @@ class TestModelConfig:
     def test_router_tiers(self):
         """model_router 层级映射"""
         from config_manager import ConfigManager
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         assert c.get_tier_model("flash") == "deepseek-v4-flash"
         assert c.get_tier_model("pro") == "deepseek-v4-pro"
         assert c.get_tier_model("max") == "glm-5.2"
@@ -239,7 +239,7 @@ class TestModelConfig:
         """ModelRouter 从 ConfigManager 加载"""
         from config_manager import ConfigManager
         from model_router import ModelRouter
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         r = ModelRouter(config_manager=c)
         assert len(r.tiers) == 3
         assert r.flash.model == "deepseek-v4-flash"
@@ -249,7 +249,7 @@ class TestModelConfig:
 
     def test_get_model_base_url(self):
         from config_manager import ConfigManager
-        c = ConfigManager()
+        c = ConfigManager(config_path=str(Path(__file__).with_name("config.example.json")))
         assert "deepseek.com" in c.get_model_base_url("deepseek-v4-pro")
         assert "bigmodel.cn" in c.get_model_base_url("glm-5.2")
 

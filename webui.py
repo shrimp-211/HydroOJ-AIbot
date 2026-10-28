@@ -229,7 +229,7 @@ def api_reload_prompts():
     if not _check_auth():
         return jsonify({"error": "未授权"}), 403
     try:
-        from oj_solver import AIClient
+        from ai_client import AIClient
         AIClient.reload_class_prompts()
         return jsonify({"ok": True, "msg": "提示词已重载"})
     except Exception as e:

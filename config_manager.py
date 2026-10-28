@@ -1,5 +1,6 @@
 """动态配置管理器 — 类型安全、热重载、线程安全"""
 import os
+import copy
 import json
 import time
 import logging
@@ -470,10 +471,10 @@ class ConfigManager:
     def get_model_config(self, model_name: str) -> dict:
         """获取指定模型的完整配置，合并模型自身字段与全局默认值。
         返回: {base_url, api_key, max_tokens, reasoning_effort, pricing}"""
+        cfg = self.cfg  # Probe reload before consulting the cache.
         cached = self._model_cache.get(model_name)
         if cached is not None:
-            return cached
-        cfg = self.cfg
+            return copy.deepcopy(cached)
         md = cfg.models.get(model_name) if cfg.models else None
         if md is None:
             result = dict(base_url=cfg.ai_base_url, api_key=self.api_key,
@@ -490,10 +491,15 @@ class ConfigManager:
                     if md.get("reasoning_effort") is not None else cfg.ai_reasoning_effort,
                 pricing=md.get("pricing") or {},
             )
+        if isinstance(md, dict):
+            for key in ("provider", "token_parameter", "supports_reasoning_effort",
+                        "thinking", "extra_body", "stream_usage", "timeout", "max_retries"):
+                if key in md and md[key] is not None:
+                    result[key] = copy.deepcopy(md[key])
         # 每次 AI 调用都会走这里（经 get_model_base_url / api_key / max_tokens），
         # 缓存后省掉重复的 dict 拷贝与环境变量解析。
         self._model_cache[model_name] = result
-        return result
+        return copy.deepcopy(result)
 
     def _resolve_model_api_key(self, val) -> str:
         """解析模型级 api_key：null → 返回空；全大写 → 环境变量引用；含. → 字面值"""
