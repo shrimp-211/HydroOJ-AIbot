@@ -135,11 +135,11 @@ textarea { font-family: var(--mono); font-size: 12px; }
     <div class="card">
       <h2>AI 模型</h2>
       <label>API 地址</label><input id="cfg-ai-url" placeholder="https://api.deepseek.com">
-      <label>API Key（sk-xxx 或环境变量名）</label><input id="cfg-ai-key">
+      <label>API Key（建议填 env:AI_API_KEY；留空保留）</label><input id="cfg-ai-key" type="password" autocomplete="new-password">
       <div class="config-grid">
         <div><label>模型</label><input id="cfg-ai-model"></div>
         <div><label>推理强度</label>
-          <select id="cfg-ai-reasoning">
+          <select id="cfg-ai-reasoning"><option value="">不指定</option>
             <option value="low">low</option><option value="medium">medium</option>
             <option value="high" selected>high</option><option value="max">max</option>
           </select>
@@ -158,10 +158,27 @@ textarea { font-family: var(--mono); font-size: 12px; }
       <label>检查间隔（秒）</label><input id="cfg-mon-interval" type="number">
       <label>状态文件</label><input id="cfg-mon-state" placeholder="processed_contests.json">
     </div>
+    <div class="card">
+      <h2>Token 与求解策略</h2>
+      <label>求解输出上限（包含推理 Token）</label><input id="cfg-solve-budget" type="number" min="1">
+      <label>方案输出上限</label><input id="cfg-plan-budget" type="number" min="1">
+      <label>题解输出上限</label><input id="cfg-editorial-budget" type="number" min="1">
+      <label><input id="cfg-detect" type="checkbox" style="width:auto"> 调用 AI 判断难度</label>
+      <label><input id="cfg-compact" type="checkbox" style="width:auto"> 精简修复历史（保留完整题面与当前代码）</label>
+      <p class="small mt8">模型独立设置会覆盖全局参数；预算与模型上限取较小值。</p>
+    </div>
+    <div class="card">
+      <h2>访问设置</h2>
+      <label>WebUI 访问令牌（仅启用 --auth-token 时填写）</label>
+      <input id="cfg-web-token" type="password" autocomplete="off" oninput="sessionStorage.setItem('oj-auth', this.value)">
+      <p class="small mt8">令牌只保存在当前浏览器会话。服务端环境变量优先于这里保存的配置。</p>
+      <pre id="cfg-diagnostics" style="white-space:pre-wrap;margin-top:12px"></pre>
+    </div>
     <div class="card full" style="grid-column: 1 / -1;">
       <div class="btn-group">
         <button class="btn btn-primary" onclick="loadConfig()">刷新配置</button>
         <button class="btn btn-green" onclick="saveConfig()">保存配置</button>
+        <button class="btn btn-outline" onclick="diagnoseConfig()">检查配置（不调用 AI）</button>
         <span class="msg" id="cfg-msg"></span>
       </div>
     </div>
@@ -169,6 +186,10 @@ textarea { font-family: var(--mono); font-size: 12px; }
 </div>
 
 <script>
+function apiFetch(path, options = {}) {
+  return fetch(path, {...options, headers: {...(options.headers || {}), 'X-Auth-Token': sessionStorage.getItem('oj-auth') || ''}});
+}
+document.getElementById('cfg-web-token').value = sessionStorage.getItem('oj-auth') || '';
 const con = document.getElementById('console');
 const evtSource = new EventSource('/stream');
 evtSource.onmessage = function(e) {
@@ -184,7 +205,7 @@ evtSource.onmessage = function(e) {
 };
 
 function post(path, body) {
-  return fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }).then(r => r.json());
+  return apiFetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }).then(r => r.json());
 }
 
 function solveSingle(e, noSubmit) {
@@ -217,7 +238,7 @@ function daemon(action) {
 }
 
 function updateDaemonStatus() {
-  fetch('/status').then(r => r.json()).then(s => {
+  apiFetch('/status').then(r => r.json()).then(s => {
     const on = s.daemon_running;
     document.getElementById('daemon-dot').className = 'dot' + (on ? '' : ' off');
     document.getElementById('daemon-badge').textContent = on ? '守护运行中' : '守护已停止';
@@ -232,7 +253,7 @@ function updateDaemonStatus() {
     document.getElementById('btn-kill').disabled = !tr;
   });
   // 刷新历史
-  fetch('/history').then(r => r.json()).then(items => {
+  apiFetch('/history').then(r => r.json()).then(items => {
     const h = document.getElementById('history');
     h.textContent = '';
     if (items.length) {
@@ -249,12 +270,12 @@ function updateDaemonStatus() {
 }
 
 function killTask() {
-  fetch('/kill', {method:'POST'});
+  apiFetch('/kill', {method:'POST'});
 }
 
 function clearLog() {
   document.getElementById('console').innerHTML = '';
-  fetch('/clear', {method:'POST'});
+  apiFetch('/clear', {method:'POST'});
 }
 
 function switchTab(name) {
@@ -273,69 +294,61 @@ function showMsg(text, ok) {
 }
 
 async function loadConfig() {
-  const r = await fetch('/config');
-  const c = await r.json();
-  const oj = c.oj || {}, ai = c.ai || {}, code = c.code || {}, mon = c.monitor || {};
-  document.getElementById('cfg-oj-root').value = oj.root || '';
-  document.getElementById('cfg-oj-base').value = oj.base || '';
-  document.getElementById('cfg-oj-user').value = oj.username || '';
-  document.getElementById('cfg-oj-pass').value = oj.password || '';
-  document.getElementById('cfg-ai-url').value = ai.base_url || '';
-  // API Key 仅显示是否已配置，不暴露任何部分
-  const hasKey = ai.api_key_configured || false;
-  document.getElementById('cfg-ai-key').value = hasKey ? '(已配置)' : '';
-  document.getElementById('cfg-ai-key').placeholder = hasKey ? '已配置，输入新值覆盖' : 'sk-xxx 或 AI_API_KEY 环境变量名';
-  document.getElementById('cfg-ai-key').dataset.configured = hasKey ? '1' : '0';
-  document.getElementById('cfg-ai-model').value = ai.model || '';
-  document.getElementById('cfg-ai-reasoning').value = ai.reasoning_effort || 'high';
-  document.getElementById('cfg-ai-maxtok').value = ai.max_tokens || 32768;
-  document.getElementById('cfg-code-lang').value = code.lang || '';
-  document.getElementById('cfg-mon-domains').value = (mon.domains || []).join(', ');
-  document.getElementById('cfg-mon-interval').value = mon.interval || 600;
-  document.getElementById('cfg-mon-state').value = mon.state_file || '';
+  try {
+    const r = await apiFetch('/config');
+    const c = await r.json();
+    if (!r.ok) throw new Error(c.error || '读取失败');
+    const fields = {'oj-root':'oj_root', 'oj-base':'oj_base', 'oj-user':'username',
+      'ai-url':'ai_base_url', 'ai-model':'ai_model', 'ai-reasoning':'ai_reasoning_effort',
+      'ai-maxtok':'ai_max_tokens', 'code-lang':'code_lang', 'mon-interval':'monitor_interval',
+      'mon-state':'monitor_state_file'};
+    for (const [id, key] of Object.entries(fields)) document.getElementById('cfg-'+id).value = c[key] ?? '';
+    for (const [id, configured] of [['ai-key', c.ai_api_key_configured], ['oj-pass', c.password_configured]]) {
+      const input = document.getElementById('cfg-'+id);
+      input.value = '';
+      input.placeholder = configured ? '已配置，留空保留' : '尚未配置';
+    }
+    document.getElementById('cfg-mon-domains').value = (c.monitor_domains || []).join(', ');
+    document.getElementById('cfg-solve-budget').value = c.ai_task_tokens?.solve ?? 16384;
+    document.getElementById('cfg-plan-budget').value = c.ai_task_tokens?.plan ?? 4096;
+    document.getElementById('cfg-editorial-budget').value = c.ai_task_tokens?.editorial ?? 8192;
+    document.getElementById('cfg-detect').checked = c.difficulty_detect_enable;
+    document.getElementById('cfg-compact').checked = c.compact_history;
+  } catch (error) { showMsg(error.message, false); }
 }
 
 async function saveConfig() {
-  const keyInput = document.getElementById('cfg-ai-key');
-  const keyValue = keyInput.value.trim();
-  const wasConfigured = keyInput.dataset.configured === '1';
-  // 仅当用户输入了新内容时才传输 Key
-  const keyChanged = keyValue !== '' && (keyValue !== '(已配置)' || !wasConfigured);
-  const aiPayload = {
-    base_url: document.getElementById('cfg-ai-url').value.trim(),
-    model: document.getElementById('cfg-ai-model').value.trim(),
-    reasoning_effort: document.getElementById('cfg-ai-reasoning').value,
-    max_tokens: parseInt(document.getElementById('cfg-ai-maxtok').value) || 32768,
-  };
-  // 仅当用户修改了 Key 时才传输新值
-  if (keyChanged && keyValue) {
-    aiPayload.ai_api_key = keyValue;
-  }
+  const value = id => document.getElementById('cfg-'+id).value.trim();
   const payload = {
-    oj: {
-      root: document.getElementById('cfg-oj-root').value.trim(),
-      base: document.getElementById('cfg-oj-base').value.trim(),
-      username: document.getElementById('cfg-oj-user').value.trim(),
-      password: document.getElementById('cfg-oj-pass').value,
-    },
-    ai: aiPayload,
-    code: {
-      lang: document.getElementById('cfg-code-lang').value.trim(),
-      lang_display: document.getElementById('cfg-code-lang').value.trim(),
-    },
-    monitor: {
-      domains: document.getElementById('cfg-mon-domains').value.split(',').map(s => s.trim()).filter(Boolean),
-      interval: parseInt(document.getElementById('cfg-mon-interval').value) || 600,
-      state_file: document.getElementById('cfg-mon-state').value.trim(),
-    }
+    oj_root:value('oj-root'), oj_base:value('oj-base'), username:value('oj-user'),
+    ai_base_url:value('ai-url'), ai_model:value('ai-model'), ai_reasoning_effort:value('ai-reasoning'),
+    ai_max_tokens:Number(value('ai-maxtok')), code_lang:value('code-lang'),
+    monitor_domains:value('mon-domains').split(',').map(s=>s.trim()).filter(Boolean),
+    monitor_interval:Number(value('mon-interval')), monitor_state_file:value('mon-state'),
+    ai_task_tokens:{solve:Number(value('solve-budget')), plan:Number(value('plan-budget')), editorial:Number(value('editorial-budget'))},
+    difficulty_detect_enable:document.getElementById('cfg-detect').checked,
+    compact_history:document.getElementById('cfg-compact').checked
   };
-  const r = await fetch('/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload)
-  });
-  if (r.ok) showMsg('配置已保存', true);
-  else showMsg('保存失败', false);
+  if (value('ai-key')) payload.ai_api_key = value('ai-key');
+  if (document.getElementById('cfg-oj-pass').value) payload.password = document.getElementById('cfg-oj-pass').value;
+  try {
+    const r = await apiFetch('/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const result = await r.json();
+    if (!r.ok) throw new Error((result.errors || [result.error || '保存失败']).join('；'));
+    showMsg('配置已保存', true);
+    await loadConfig();
+  } catch (error) { showMsg(error.message, false); }
+}
+
+async function diagnoseConfig() {
+  const box = document.getElementById('cfg-diagnostics');
+  try {
+    const r = await apiFetch('/config/doctor');
+    const result = await r.json();
+    if (!r.ok) throw new Error(result.error || '检查失败');
+    box.textContent = [result.ok ? '检查通过' : '请修正以下问题', ...result.errors, ...result.warnings,
+      ...result.models.map(m => `${m.name}: ${m.provider}，输出上限 ${m.output_limit ?? '?'}`)].join('\n');
+  } catch (error) { box.textContent = error.message; }
 }
 
 // 首次加载

@@ -22,12 +22,13 @@ def config(tmp_path, **model):
 
 
 def test_provider_options_and_token_limit():
-    cfg = dict(base_url='https://api.openai.com/v1', max_tokens=1000, reasoning_effort='low')
+    cfg = dict(base_url='https://api.openai.com/v1', max_tokens=1000, reasoning_effort='low', supports_reasoning_effort=True)
     args = build_request('m', [], cfg, max_tokens=2000)
     assert args['max_completion_tokens'] == 1000
     assert args['reasoning_effort'] == 'low'
     assert 'max_tokens' not in args and 'extra_body' not in args
     cfg['base_url'] = 'https://deepseek.example.test/v1'
+    cfg.pop('supports_reasoning_effort')
     args = build_request('m', [], cfg)
     assert 'reasoning_effort' not in args and 'extra_body' not in args
     assert args['max_tokens'] == 1000

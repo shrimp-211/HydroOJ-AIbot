@@ -8,6 +8,10 @@ OJ Solver Web GUI — 网页操作界面
 import os
 import sys
 import json
+from dataclasses import asdict
+from config_manager import ConfigManager, FIELD_TO_JSON
+from config_io import (read_config, atomic_write_json, normalize_config,
+                       merge_config, redact_config, validate_document)
 import queue
 import shlex
 import signal
@@ -41,12 +45,7 @@ AUTH_TOKEN = ""  # 如果设置，需要在请求头携带 X-Auth-Token
 
 
 def save_config(cfg: dict):
-    """原子写入 config.json：先写临时文件再替换，避免写一半被中断后配置损坏。"""
-    path = ROOT / "config.json"
-    tmp = path.with_suffix(".json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-    tmp.replace(path)
+    atomic_write_json(ROOT / "config.json", cfg)
 
 
 def broadcast(msg: str):
@@ -134,40 +133,43 @@ def index():
     return render_template_string(PAGE)
 
 
+_config_lock = threading.Lock()
+
+
 @app.route("/config", methods=["GET", "POST"])
 def config_page():
-    if request.method == "POST":
-        if not _check_auth(): return jsonify({"error": "未授权"}), 403
-        new_cfg = request.json
-        if new_cfg:
-            old = load_config()
-            for section in new_cfg:
-                if section in old and isinstance(old[section], dict):
-                    payload = new_cfg[section]
-                    # ai_api_key 仅在前端传了新值时才更新
-                    if section == "ai" and "ai_api_key" not in payload:
-                        keys = {k: v for k, v in payload.items() if k != "ai_api_key"}
-                        old[section].update(keys)
-                    else:
-                        old[section].update(payload)
-                else:
-                    old[section] = new_cfg[section]
-            save_config(old)
-            emit("配置已更新")
-        return jsonify({"ok": True})
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
+    path = ROOT / "config.json"
+    try:
+        with _config_lock:
+            if request.method == "POST":
+                patch = request.get_json(silent=True)
+                if not isinstance(patch, dict):
+                    return jsonify({"error": "配置必须是 JSON 对象"}), 400
+                merged = merge_config(read_config(path), normalize_config(patch))
+                errors = validate_document(merged)
+                if errors:
+                    return jsonify({"error": "配置校验失败", "errors": errors}), 400
+                save_config(merged)
+                emit("配置已更新")
+                return jsonify({"ok": True})
+            manager = ConfigManager(str(path))
+            cfg = read_config(path)
+            cfg.update({key: getattr(manager.cfg, attr) for attr, key in FIELD_TO_JSON.items()})
+            safe = redact_config(cfg)
+            safe["ai_api_key_configured"] = bool(manager.api_key)
+            return jsonify(safe)
+    except (OSError, ValueError, TypeError):
+        return jsonify({"error": "无法读取或保存配置，请检查 JSON 格式与文件权限"}), 400
 
-    # GET — 返回配置（API Key 仅返回是否已配置标记）
-    cfg = load_config()
-    ai_cfg = cfg.get("ai", {})
-    if ai_cfg:
-        has_key = bool(ai_cfg.get("ai_api_key", ""))
-        ai_cfg = dict(ai_cfg)
-        ai_cfg["api_key_configured"] = has_key
-        ai_cfg.pop("ai_api_key", None)
-        cfg = dict(cfg)
-        cfg["ai"] = ai_cfg
-    return jsonify(cfg)
 
+@app.route("/config/doctor")
+def config_doctor():
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
+    from config_cli import diagnose
+    return jsonify(diagnose(ROOT / "config.json"))
 
 
 @app.route("/status")

@@ -11,178 +11,13 @@ from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
 from ai_protocol import build_request, extract_usage
+from ai_context import repair_messages
 from config_manager import ConfigManager as Config
 
 log = logging.getLogger(__name__)
 
 # 当 prompts.json 缺失时使用的默认提示词（与 prompts.json 内容一致）
-DEFAULT_PROMPTS = {
-    "system_solve": "你是算法竞赛讲师。\n\n## 铁律\n- 所有数学符号、公式必须用 $...$（行内）或 $$...$$（独立行）包裹，禁止裸符号\n- 使用 long long 处理所有可能超过 2e9 的整数\n- 数组大小 = 最大数据量 + 5 的余量\n- 多组测试用例时，所有全局/静态变量必须重置\n- 循环内避免 endl，用 '\\n' 防止 TLE\n- 大输入（>10^5）使用 ios::sync_with_stdio(false); cin.tie(nullptr)\n- 递归深度 >10^5 时改写为迭代或开栈\n- 浮点数比较用 fabs(a-b) < 1e-9\n- 取模运算每一步都取模，避免溢出\n\n## 输出\n- 「解题思路」段（讲解式）\n- ```{ext} 代码块，含 #include 和 main 函数",
-
-    "system_solve_easy": "你是算法竞赛讲师。\n\n## 铁律\n- 所有数学符号用 $...$ 包裹，禁止裸符号\n- 使用 long long 处理大整数\n- 检查边界：n=0、n=1、最大/最小值\n- 代码简洁清晰\n\n## 输出\n- 「解题思路」段（简练）\n- ```{ext} 代码块，含 #include 和 main 函数",
-
-    "system_solve_hard": "你是算法竞赛讲师。\n\n## 铁律\n- 所有数学符号用 $...$ 或 $$...$$ 包裹，禁止裸符号\n- 使用 long long 处理所有可能超过 2e9 的整数\n- 数组大小 = 最大数据量 + 5 的余量\n- 多组测试用例时，所有全局/静态变量必须重置\n- 循环内避免 endl，用 '\\n' 防止 TLE\n- 大输入（>10^5）使用 ios::sync_with_stdio(false); cin.tie(nullptr)\n- 递归深度 >10^5 时改写为迭代或开栈\n- 浮点数比较用 fabs(a-b) < 1e-9\n- 取模运算每一步都取模，避免溢出\n- 考虑离散化、坐标压缩、离线处理等技巧\n\n## 输出\n- 「解题思路」段（含算法对比 + 推导证明）\n- ```{ext} 代码块，含 #include 和 main 函数",
-    "system_fix": "你是算法讲师，根据评测反馈修正解法并给出更好的讲解。\n\n## 修正流程\n1. 对照评测反馈，精准定位失败原因（不是猜测）\n2. 编译错误 → 检查语法/头文件；运行时错误 → 检查越界/溢出/空指针；WA → 检查逻辑/边界/特殊 case；TLE → 分析复杂度瓶颈\n3. 修正后用题目样例在脑中模拟验证\n4. 在题解中讲解「之前的错误是什么、为什么错、正确做法是什么」\n\n## 铁律\n- 不猜测，根据评测证据推导\n- 如果原算法正确但实现有 bug → 修正 bug，讲解 bug 成因\n- 如果算法本身有缺陷 → 换用正确算法，讲解为什么新算法更优\n- 输出必须有「解题思路」（讲解式）+「代码」",
-    "system_obfuscate": "你是一个代码混淆专家。仅输出混淆后的代码，不添加任何解释、注释或额外文本。",
-    "fix_with_history": "请修正上一份代码。\n\n## 评测反馈\n得分: {score}\n{error_hint}\n{ce_section}### 测试详情\n{errors}\n\n## 修正任务\n根据错误信息修正代码。\n\n## 输出格式\n## 解题思路\n（讲解正确解法）\n\n## 代码\n```{ext}\n（完整修正后的代码）\n```",
-    "obfuscate": "请对以下代码进行强力混淆，使其难以阅读和理解，但功能完全不变。\n\n要求：\n- 重命名所有变量、函数、类名为无意义的短名称（如 a1, b2, c3 或 _0x 前缀）\n- 将连续语句合并为逗号表达式\n- 删除所有注释和多余空白\n- 展开简单函数为内联代码（宏或直接嵌入）\n- 将常量替换为晦涩的等价表达式\n- 保持代码能通过相同的编译和评测\n\n原始代码：\n```{ext}\n{code}\n```\n\n仅输出混淆后的代码，不要任何解释：\n```{ext}\n（混淆后的代码）\n```",
-    "generate": "【{title}】{info}\n{content}\n\n---\n请讲解并给出代码。时限 {time_limit}，内存 {memory_limit}，{io_hint}\n\n## 解题思路\n（算法选择理由 → 关键推导 → 边界 → 复杂度）\n\n## 代码\n```{ext}\n（完整代码，含 #include 和 main）\n```",
-
-    "generate_easy": "【{title}】{info}\n{content}\n\n---\n简单题，请简洁讲解。时限 {time_limit}，内存 {memory_limit}，{io_hint}\n\n## 解题思路\n（3-5 句话）\n\n## 代码\n```{ext}\n（完整代码）\n```",
-
-    "generate_flash": "【{title}】{info}\n{content}\n\n---\n请给出正确解法。时限 {time_limit}，内存 {memory_limit}，{io_hint}\n\n## 解题思路\n（简短）\n\n## 代码\n```{ext}\n（完整代码）\n```",
-
-    "generate_hard": "【{title}】{info}\n{content}\n\n---\n困难题，请深入讲解。时限 {time_limit}，内存 {memory_limit}，{io_hint}\n\n## 解题思路\n（问题转化 → 算法对比 → 推导证明 → 边界清单 → 实现要点 → 复杂度）\n\n## 代码\n```{ext}\n（完整代码）\n```",
-
-    # ── Agent 求解循环用的提示词（分析 → 实现 → 修正 → 对拍素材）──
-    "agent_system": "你是算法竞赛选手。你的产出会被自动编译、跑样例、随机对拍，只有本地验证通过的代码才会提交评测。\n\n## 铁律\n- 代码必须是完整可编译的程序（含必要的头文件与 main 函数）\n- 读入方式按题面要求：默认标准输入输出，注明文件 IO 时必须按要求读写文件\n- 使用 long long 处理可能超过 2e9 的整数；数组大小 = 最大数据量 + 5\n- 多组数据时重置全局/静态变量；大输入加 ios::sync_with_stdio(false); cin.tie(nullptr);\n- 先保证正确，再考虑优化；不确定的边界（n=0/1、极值、相同元素、退化图）必须显式处理\n- 输出格式严格按题面（多余空格、缺换行都会判错）",
-    "agent_plan": """先分析题目，给出解题方案，不要写代码。
-
-## 题目
-{title}
-
-{content}
-
-时限 {time_limit}，内存 {memory_limit}
-
-## 输出格式
-1. **问题本质**：一句话说明这题在求什么
-2. **算法**：选定算法 + 为什么它能过（与备选方案对比）
-3. **关键推导/不变量**：写清正确性依据
-4. **复杂度**：时间/空间，与限制比较
-5. **边界清单**：需要显式处理的情况（逐条列出）""",
-    "agent_implement": """按方案写出完整代码。
-
-## 题目
-{title}
-
-{content}
-
-时限 {time_limit}，内存 {memory_limit}
-
-## 方案
-{plan}
-
-## 要求
-- 严格按上述方案实现，逐个处理边界清单
-- 只输出一个代码块（```{ext} ... ```），外加不超过 3 行的要点说明
-- 写完后在脑中用样例验证一遍，确认输出格式正确""",
-    "agent_repair": """上一份代码没通过验证，请修正。**不要重复已经失败的思路**。
-
-## 题目
-{title}
-
-{content}
-
-## 原方案
-{plan}
-
-## 当前代码
-```{ext}
-{code}
-```
-
-{feedback}
-
-## 已尝试过（避免重复）
-{journal}
-
-## 修正要求
-1. 先根据反馈定位**确切原因**（编译错误看报错行；样例 WA 看 diff；对拍失败看反例）
-2. 如果是思路本身错了 → 换算法并说明，不要在原思路上打补丁
-3. 输出完整的新代码（```{ext} ... ```），不要只给片段
-4. 最后用反例/样例自检一遍""",
-    "agent_reference": """为下面的题目提供**暴力解**和**随机数据生成器**，用于对拍验证。
-
-## 题目
-{title}
-
-{content}
-
-## 要求
-- 暴力解：正确性优先，允许指数级/平方级复杂度，只需能处理很小的数据（n ≤ 10 量级）
-- 数据生成器：从标准输入读入轮次编号（随机种子），向标准输出打印一组**合法且规模很小**的随机数据
-  - 多个数/多行时用空格或换行分隔，格式必须与题面输入格式完全一致
-  - 有时用种子初始化随机数，保证不同轮次数据不同
-- 两者都只依赖标准输入输出，不读文件
-
-## 输出格式（严格，两个代码块）
-```brute
-（暴力解完整代码）
-```
-```gen
-（数据生成器完整代码）
-```""",
-
-    # ── 候选解法多样化：第二条思路必须真的换算法，而不是改改上一版 ──
-    "agent_alternative_plan": """上一版思路没能通过评测，请**换一个不同的算法角度**重新分析。
-
-## 题目
-{title}
-
-{content}
-
-时限 {time_limit}，内存 {memory_limit}
-
-## 已经试过的思路（不要重复）
-{journal}
-
-## 要求
-1. 明确说明**为什么上一版不可行**（复杂度、边界、正确性）
-2. 给出一个**根本不同**的算法：不同数据结构 / 不同转化 / 正难则反 / 不同复杂度级别
-3. 写出新算法的复杂度与边界清单
-4. 只输出方案，不要写代码""",
-
-    # ── 题解产出 ──
-    "editorial_system": "你是算法竞赛讲师，负责把已经通过评测的解法写成高质量中文题解。你的读者是没做过这道题的人：要先讲清题意与思路来源，再给证明与复杂度。数学符号一律用 $...$ 包裹。",
-    "editorial_write": """根据一份**已经通过评测**的代码，写一篇可以直接发布的题解。
-
-## 题目
-{title}
-
-{content}
-
-时限 {time_limit}，内存 {memory_limit}
-
-## 通过评测的代码（必须原样出现在题解里）
-```{ext}
-{code}
-```
-
-## 评测信息
-得分 {score}｜用时 {time_ms}ms｜内存 {memory_kb}KB｜难度 {difficulty} 级｜标签：{tags}
-
-## 求解过程中踩过的坑（写进「易错点」会更有说服力）
-{journal}
-
-## 写作要求
-1. 用二级标题组织，顺序固定：
-   `## 题意` / `## 思路` / `## 正确性说明` / `## 复杂度分析` / `## 实现要点与易错点` / `## 代码`
-2. 「思路」要讲**怎么想到的**：从暴力做法出发，说明哪里不够、怎么改进到最终算法
-3. 「正确性说明」给出关键不变量或归纳依据，不要写「显然」「易证」
-4. 「复杂度分析」给出时间与空间的式子（用 $O(...)$），并与题目限制对照
-5. 「实现要点与易错点」结合上面的踩坑记录，写清容易写错的地方（边界、溢出、初始化、输出格式）
-6. 代码块必须与上面给出的代码**逐字一致**：不要改写、不要精简、不要加注释、不要换语言标记
-7. 数学符号统一用 $...$，禁止裸写 \\le、\\sum、\\frac 等命令
-8. 直接输出题解正文，不要出现「好的」「以下是」「希望对你有帮助」这类口气""",
-    "editorial_fix": """这篇题解没有通过发布前检查，请**只针对下列问题**修改，其余内容保持原样。
-
-## 需要修正的问题
-{issues}
-
-## 当前题解
-{draft}
-
-## 必须原样保留的代码（与 AC 代码逐字一致）
-```{ext}
-{code}
-```
-
-## 要求
-1. 逐条解决上面的问题，不要重写无关段落
-2. 仍然保持六个二级标题的结构：题意 / 思路 / 正确性说明 / 复杂度分析 / 实现要点与易错点 / 代码
-3. 输出完整的修正后题解""",
-}
+from prompt_defaults import DEFAULT_PROMPTS
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -406,8 +241,11 @@ class AIClient:
 
         tpl = self._p("fix_with_history", DEFAULT_PROMPTS.get("fix_with_history", ""))
         fix_prompt = tpl.format(**fmt)
+        messages = (repair_messages(history, code, ext, fix_prompt)
+                    if self.config.get("compact_history", True) else
+                    history + [{"role": "user", "content": fix_prompt}])
         return self._call_ai_with_messages(
-            history + [{"role": "user", "content": fix_prompt}], use_stream,
+            messages, use_stream,
             images=problem.get("images") or [], model=model, effort=effort)
 
     def obfuscate(self, code: str, model: str = "", effort: str = "") -> dict | None:
@@ -427,7 +265,7 @@ class AIClient:
                     max_tokens: int = 0) -> dict:
         model = model or self.config["ai_model"]
         return build_request(model, messages, self.config.get_model_config(model),
-                             max_tokens=max_tokens, effort=effort)
+                             max_tokens=max_tokens or self.config.task_token_limit(), effort=effort)
 
     _extract_usage = staticmethod(extract_usage)
 
@@ -515,7 +353,7 @@ class AIClient:
 
     def _call_ai_with_messages(self, messages: list, use_stream: bool = False,
                                images: list | None = None, model: str = "",
-                               effort: str = "") -> dict | None:
+                               effort: str = "", task: str = "solve") -> dict | None:
         model = model or self.config["ai_model"]
         messages = copy.deepcopy(messages)
         if images and self.config.is_vision_model(model):
@@ -538,7 +376,8 @@ class AIClient:
                             existing.add(img)
                     messages[i]["content"] = content
                     break
-        r = self.chat(messages, model=model, use_stream=use_stream, effort=effort)
+        r = self.chat(messages, model=model, use_stream=use_stream, effort=effort,
+                      max_tokens=self.config.task_token_limit(task))
         if not r or r.get("_rate_limited"):
             return r
         code = self._extract_code(r["content"], self.config.lang_ext)
@@ -549,11 +388,11 @@ class AIClient:
     # ---- 核心调用 ----
     def _call_ai(self, user_prompt: str, system_msg: str,
                  use_stream: bool = False, images: list | None = None,
-                 model: str = "", effort: str = "") -> dict | None:
+                 model: str = "", effort: str = "", task: str = "solve") -> dict | None:
         return self._call_ai_with_messages(
             [{"role": "system", "content": system_msg},
              {"role": "user", "content": user_prompt}],
-            use_stream, images=images, model=model, effort=effort)
+            use_stream, images=images, model=model, effort=effort, task=task)
 
     def _stream_call(self, args: dict) -> tuple:
         client = self._get_client(args["model"])

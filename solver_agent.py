@@ -86,7 +86,7 @@ class SolverAgent:
     """
 
     def __init__(self, ai, config, judge: LocalJudge | None = None,
-                 submit_fn=None, judge_fn=None, banner_fn=None, cost_exceeded=None):
+                 submit_fn=None, judge_fn=None, banner_fn=None, cost_exceeded=None, remaining_budget=None):
         self.ai = ai
         self.config = config
         self.judge = judge
@@ -94,6 +94,7 @@ class SolverAgent:
         self.judge_fn = judge_fn
         self.banner_fn = banner_fn
         self.cost_exceeded = cost_exceeded or (lambda: False)
+        self.remaining_budget = remaining_budget or (lambda: float("inf"))
         self._reference: tuple[str, str] | None = None
         self._reference_tried = False
 
@@ -274,12 +275,15 @@ class SolverAgent:
         return bool(self.judge and self.judge.available)
 
     def _call(self, prompt: str, model: str, effort: str, out: AttemptOutcome,
-              use_stream: bool = False, max_tokens: int = 0) -> str:
+              use_stream: bool = False, max_tokens: int = 0, task: str = "solve") -> str:
         """一次模型调用，并把 token/费用记入本次尝试。"""
+        if self.cost_exceeded() or out.cost >= self.remaining_budget():
+            out.is_cost_capped = True
+            return ""
         r = self.ai.chat([{"role": "system", "content": self.ai._p("agent_system", "")},
                           {"role": "user", "content": prompt}],
                          model=model, effort=effort, use_stream=use_stream,
-                         max_tokens=max_tokens)
+                         max_tokens=max_tokens or self.config.task_token_limit(task))
         if not r:
             return ""
         for k in ("input", "output", "total", "cache_hit"):
@@ -292,10 +296,10 @@ class SolverAgent:
         if not tpl:
             return ""
         prompt = tpl.format(title=problem.get("title", ""),
-                            content=problem.get("content", "")[:6000],
+                            content=problem.get("content", ""),
                             time_limit=problem.get("time_limit", "?"),
                             memory_limit=problem.get("memory_limit", "?"))
-        plan = self._call(prompt, model, effort, out)
+        plan = self._call(prompt, model, effort, out, task="plan")
         if plan:
             log.info("[Agent] 方案已生成（%d 字符）", len(plan))
         return plan
@@ -309,11 +313,11 @@ class SolverAgent:
         if not tpl:
             return ""
         prompt = tpl.format(title=problem.get("title", ""),
-                            content=problem.get("content", "")[:5000],
+                            content=problem.get("content", ""),
                             time_limit=problem.get("time_limit", "?"),
                             memory_limit=problem.get("memory_limit", "?"),
                             journal=self._journal_text(out))
-        idea = self._call(prompt, model, effort, out)
+        idea = self._call(prompt, model, effort, out, task="plan")
         return idea
 
     def _produce_code(self, problem: dict, idea: str, out: AttemptOutcome, model: str,
@@ -331,7 +335,7 @@ class SolverAgent:
         else:
             tpl = self.ai._p("agent_repair", "")
             prompt = tpl.format(title=problem.get("title", ""),
-                                content=problem.get("content", "")[:4000],
+                                content=problem.get("content", ""),
                                 plan=idea or "-",
                                 code=out.code or "(尚未生成)",
                                 feedback=feedback or self._feedback_text(out),
@@ -380,9 +384,9 @@ class SolverAgent:
         if not tpl:
             return None
         prompt = tpl.format(title=problem.get("title", ""),
-                            content=problem.get("content", "")[:4000],
+                            content=problem.get("content", ""),
                             ext=self.config.lang_ext)
-        content = self._call(prompt, model, effort, out)
+        content = self._call(prompt, model, effort, out, task="reference")
         blocks = extract_labeled_blocks(content, ("brute", "gen", "generator"))
         brute = blocks.get("brute", "")
         gen = blocks.get("gen") or blocks.get("generator") or ""

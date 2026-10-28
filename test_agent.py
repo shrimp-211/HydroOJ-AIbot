@@ -149,7 +149,7 @@ class _ScriptedAI(AIClient):
         self._code_idx = 0
 
     def _call_ai(self, user_prompt, system_msg, use_stream=False, images=None,
-                 model="", effort=""):
+                 model="", effort="", task="solve"):
         """原三层循环走的是 _call_ai，这里复用同一套脚本内容。"""
         r = self.chat([{"role": "user", "content": user_prompt}], model=model)
         content = r["content"]

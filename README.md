@@ -27,6 +27,21 @@
 
 ### 1. 环境配置
 
+建议先创建单模型配置（需要 Python 3.10+）：
+
+```bash
+pip install -r requirements.txt
+python config_cli.py init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example --profile economy
+# 填写生成的 .env：OJ_USERNAME、OJ_PASSWORD、AI_API_KEY
+python config_cli.py doctor
+python webui.py
+```
+
+`init` 不覆盖已有配置或 `.env`。`economy` 关闭单独的难度判断、使用两条候选思路，
+保留本地验证、对拍和结构化题解；`balanced` 保留难度判断与三条候选。
+供应商可用 `--provider openai|deepseek|zhipu|compatible` 指定（默认兼容端点）。
+已有多模型配置可继续使用；下方是手动配置方式。
+
 ```bash
 # 安装依赖
 pip install -r requirements.txt
@@ -180,7 +195,13 @@ bm <链接>         — 指定范围标程题解
 
 ```
 ojai/
-  oj_solver.py          — 单题求解 (AIClient + OJClient + SolverOrchestrator)
+  oj_solver.py          — 单题求解 (OJClient + SolverOrchestrator)
+  ai_client.py          — 统一 AI 客户端、流式响应、费用统计
+  ai_protocol.py        — 供应商参数与 usage 归一化
+  ai_context.py         — 保留完整题面/当前代码的修复上下文
+  prompt_defaults.py    — 内置提示词兜底
+  config_io.py          — 配置迁移、原子保存、校验、脱敏
+  config_cli.py         — 初始化与离线诊断
   contest_solver.py     — 比赛/训练批量求解 (多线程)
   contest_daemon.py     — 守护进程 (监控 + 交互 + 私信)
   benchmark_solver.py   — 标程题解自动生成
@@ -324,11 +345,11 @@ AC 代码 + 题目 + 评测数据 + 求解时的踩坑记录
 ## 测试
 
 ```bash
-python -m pytest -q                 # 154 个单元测试
-python -m pytest test_core.py -q    # 仅核心逻辑（33 个）
-python -m pytest test_optimizations.py -q   # 仅优化项回归（53 个）
-python -m pytest test_agent.py -q   # 仅 agent 求解层（39 个，缺 g++ 时自动跳过编译相关用例）
-python -m pytest test_editorial.py -q       # 仅题解产出管线（22 个）
+python -m pytest -q                 # 全部离线测试（不需要 AI/OJ 凭据）
+python -m pytest test_core.py -q    # 仅核心逻辑
+python -m pytest test_optimizations.py -q   # 仅优化项回归
+python -m pytest test_agent.py -q   # 仅 agent 求解层（缺 g++ 时自动跳过编译相关用例）
+python -m pytest test_editorial.py -q       # 仅题解产出管线
 ```
 
 ---
@@ -361,7 +382,7 @@ python -m pytest test_editorial.py -q       # 仅题解产出管线（22 个）
 - `provider`: `auto` / `openai` / `deepseek` / `zhipu` / `compatible`。代理地址建议显式设置；
   自动识别仅匹配官方主机名，未知兼容端点不附带专有推理参数。
 - `token_parameter`: `max_tokens` 或 `max_completion_tokens`，默认随 provider 选择。
-- `supports_reasoning_effort`: 是否传推理强度；不支持的模型设为 `false`。
+- `supports_reasoning_effort`: 是否传推理强度。OpenAI 与代理模型需按实际能力显式设为 `true`；其他情况下不猜测模型能力。DeepSeek 保留旧配置的默认行为。
 - `thinking`: `enabled` / `disabled`，控制 DeepSeek / 智谱风格的 thinking 字段。
 - `stream_usage`: 默认 `true`；不接受 `stream_options` 的网关可设为 `false`，此时可能无法统计流式费用。
 - `extra_body`: 网关扩展字段；不得覆盖模型、消息、流式开关或 token 上限。
@@ -369,3 +390,39 @@ python -m pytest test_editorial.py -q       # 仅题解产出管线（22 个）
 
 请求参数与流式用量处理依据 [Chat Completions 官方接口文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。
 模型能力、价格与输出限制需按实际服务配置；示例配置中的价格不是实时价格查询。
+
+
+## 输出预算与配置诊断
+
+新增 `ai_task_tokens`，默认输出上限如下，实际请求取任务预算与模型 `max_tokens` 的较小值：
+
+| 任务 | 默认上限 |
+| --- | ---: |
+| 通用 / 求解 | 16384 |
+| 方案分析 | 4096 |
+| 对拍素材 | 8192 |
+| 难度评估 | 1024 |
+| 题解写作与修复 | 8192 |
+
+预算包含接口计入输出的推理 token；复杂题需要时请提高对应预算。减少输出上限不等于保证减少
+实际消费，节省比例取决于题目、模型和重试次数。首轮已经 AC 后会跳过难度请求；修复历史默认
+仅保留完整题面、当前代码、最近失败摘要和最新反馈，可用 `compact_history: false` 恢复完整历史。
+题解模型只输出讲解，AC 代码由程序插入，修复题解时也只发送一份完整代码。
+难度评估、题解生成/修复与混淆的费用现在都会纳入单题统计。
+
+```bash
+python config_cli.py doctor --json
+python config_cli.py --config path/to/config.json doctor
+```
+
+诊断只检查本地配置、环境变量引用与请求参数，不发付费请求，不代表服务端连接成功。
+配置优先级仍为：命令行 / 运行时覆盖 > 环境变量 > JSON > 默认值。覆盖在热重载后保留；
+JSON 解析失败时保留上一次有效配置。密钥推荐 `env:MY_KEY` 或 `${MY_KEY}` 引用，
+显式引用缺失时会报缺失，不会把另一个服务的全局密钥发过去。配置文件保存保留扩展字段。
+
+WebUI 的配置页使用与求解器一致的扁平结构，兼容读取旧的 `oj` / `ai` / `code` / `monitor`
+分组结构。保存前验证数值和模型参数，GET 不返回密码或模型密钥原文。使用 `--auth-token`
+时，先在配置页的「访问设置」输入令牌，再刷新。全局字段与模型独立字段的优先级不变；
+模型表仍可直接编辑 JSON，页面提供全局设置与各任务预算。
+
+GitHub Actions 会在 Windows / Linux、Python 3.10 / 3.12 上运行离线回归测试。

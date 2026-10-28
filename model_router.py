@@ -46,7 +46,7 @@ class ModelRouter:
                 thinking = [t.strip() for t in thinking_raw.split(",") if t.strip()] if thinking_raw else []
                 self.tiers.append(ModelTier(name, model, thinking))
         if not self.tiers:
-            model = os.environ.get("AI_MODEL", "glm-5.2")
+            model = self.config.ai_model if self.config else os.environ.get("AI_MODEL", "glm-5.2")
             self.tiers.append(ModelTier("default", model, []))
 
     @property

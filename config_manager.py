@@ -7,73 +7,9 @@ import logging
 import threading
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
+from config_io import read_config, atomic_write_json, env_reference
 
 log = logging.getLogger(__name__)
-
-
-# AppConfig 字段 ↔ config.json 键名的唯一映射表。
-# reload()（读）、save()（写）、repair()（补）三处全部由它派生，
-# 避免以前三份手写映射表各自漂移（auto_supplement_testdata /
-# max_cost_per_problem / cost_accum_enable 曾漏在 repair 之外）。
-FIELD_TO_JSON = {
-    # OJ
-    "oj_root": "oj_root",
-    "oj_base": "oj_base",
-    "username": "username",
-    "password": "password",
-    # AI 全局默认值
-    "ai_base_url": "ai_base_url",
-    "ai_model": "ai_model",
-    "ai_api_key": "ai_api_key",
-    "ai_reasoning_effort": "ai_reasoning_effort",
-    "ai_max_tokens": "ai_max_tokens",
-    "ai_vision_model": "ai_vision_model",
-    "max_problem_images": "max_problem_images",
-    # 难度判断开关（关闭时不调用难度评估模型，直接使用 difficulty_skip_model）
-    "difficulty_detect_enable": "difficulty_detect_enable",
-    "difficulty_skip_model": "difficulty_skip_model",
-    # Agent 求解（本地编译/样例/对拍后才提交）
-    "agent_enabled": "agent_enabled",
-    "agent_max_steps": "agent_max_steps",
-    "agent_max_submissions": "agent_max_submissions",
-    "agent_max_seconds": "agent_max_seconds",
-    "agent_stress_enable": "agent_stress_enable",
-    "agent_stress_rounds": "agent_stress_rounds",
-    "agent_run_timeout": "agent_run_timeout",
-    # 求解策略：多条独立思路 + 每条修正次数
-    "solve_candidates": "solve_candidates",
-    "solve_repairs": "solve_repairs",
-    # 题解产出
-    "editorial_enable": "editorial_enable",
-    "editorial_model": "editorial_model",
-    "editorial_fix_rounds": "editorial_fix_rounds",
-    # 代码 / 运行时
-    "lang": "code_lang",
-    "verify_timeout": "verify_timeout",
-    "cookie_jar": "cookie_jar",
-    "show_thinking": "show_thinking",
-    # 监控
-    "monitor_domains": "monitor_domains",
-    "monitor_interval": "monitor_interval",
-    "monitor_state_file": "monitor_state_file",
-    # 消息
-    "msg_whitelist": "msg_whitelist",
-    "msg_push_list": "msg_push_list",
-    "msg_superuser": "msg_superuser",
-    "msg_interval": "msg_interval",
-    "msg_blocked_cmds": "msg_blocked_cmds",
-    "msg_push_events": "msg_push_events",
-    # 模型表
-    "models": "models",
-    "model_router": "model_router",
-    # 其他
-    "code_obfuscate": "code_obfuscate",
-    "benchmark_users": "benchmark_users",
-    "auto_supplement_testdata": "auto_supplement_testdata",
-    "max_cost_per_problem": "max_cost_per_problem",
-    "cost_accum_enable": "cost_accum_enable",
-}
-JSON_TO_FIELD = {v: k for k, v in FIELD_TO_JSON.items()}
 
 
 @dataclass
@@ -89,6 +25,11 @@ class AppConfig:
     ai_api_key: str = ""
     ai_reasoning_effort: str = "high"
     ai_max_tokens: int = 384000
+    ai_task_tokens: dict = field(default_factory=lambda: {
+        "default": 16384, "solve": 16384, "plan": 4096, "reference": 8192,
+        "difficulty": 1024, "editorial": 8192,
+    })
+    compact_history: bool = True
     # 多模态视觉模型（题面含图时优先使用，见 is_vision_model）
     ai_vision_model: str = "deepseek-v4-flash-vision-exp"
     max_problem_images: int = 4  # 每道题最多下载几张题面图片
@@ -141,6 +82,12 @@ class AppConfig:
         return AppConfig(**asdict(self))
 
 
+# Every dataclass field is persisted automatically; only the legacy language key differs.
+FIELD_TO_JSON = {name: ("code_lang" if name == "lang" else name)
+                 for name in AppConfig.__dataclass_fields__}
+JSON_TO_FIELD = {value: key for key, value in FIELD_TO_JSON.items()}
+
+
 class ConfigManager:
     """配置管理器 — 支持 JSON 文件 + 环境变量 + 热重载"""
 
@@ -148,24 +95,15 @@ class ConfigManager:
                  cli_overrides: dict | None = None):
         self._path = Path(config_path)
         self._config = AppConfig()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._mtime: float = 0
         self._mtime_cache: float = 0
         self._mtime_probe: float = 0.0   # 上次 stat 时间（避免每次属性访问都打盘）
         self._mtime_stat: float = -1.0   # 上次 stat 结果
         self._callbacks: list = []
-        self._model_cache: dict[str, dict] = {}
+        self._overrides = dict(cli_overrides or {})
+        self._load_error = ""
         self.reload()
-        # CLI 覆盖（最高优先级）
-        if cli_overrides:
-            with self._lock:
-                for k, v in cli_overrides.items():
-                    if v is None: continue
-                    if hasattr(self._config, k):
-                        setattr(self._config, k, v)
-                    else:
-                        log.warning("[!] 未知配置项 '%s'，已忽略", k)
-                self._model_cache.clear()
         if auto_reload:
             self._start_watcher()
 
@@ -227,11 +165,11 @@ class ConfigManager:
             # 1. JSON 文件
             if self._path.exists():
                 try:
-                    with open(self._path, "r", encoding="utf-8") as f:
-                        j = json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
-                    log.error("[配置] config.json 解析失败，使用默认值: %s", e)
-                    j = {}
+                    j = read_config(self._path)
+                except (ValueError, OSError) as e:
+                    self._load_error = f"配置读取失败: {type(e).__name__}"
+                    log.error("[配置] %s，保留上一次有效配置", self._load_error)
+                    return False
                 if isinstance(j, dict):
                     for field, key in FIELD_TO_JSON.items():
                         if key not in j or not hasattr(c, field):
@@ -255,7 +193,7 @@ class ConfigManager:
                 "ai_base_url": ["OJ_AI_BASE_URL", "AI_BASE_URL"],
                 "ai_model": ["OJ_AI_MODEL", "AI_MODEL"],
                 "ai_api_key": ["OJ_AI_API_KEY", "AI_API_KEY"],
-                "ai_reasoning_effort": ["OJ_AI_REASONING_EFFORT"],
+                "ai_reasoning_effort": ["OJ_AI_REASONING_EFFORT", "AI_REASONING_EFFORT"],
                 "ai_max_tokens": ["OJ_AI_MAX_TOKENS", "AI_MAX_TOKENS"],
                 "ai_vision_model": ["OJ_AI_VISION_MODEL"],
                 "cookie_jar": ["OJ_COOKIE_JAR"],
@@ -281,12 +219,18 @@ class ConfigManager:
                             continue
                         setattr(c, field, converted)
                         break
+            for key, value in self._overrides.items():
+                if value is not None and hasattr(c, key):
+                    setattr(c, key, copy.deepcopy(value))
+            if c.oj_root != AppConfig.oj_root and c.oj_base == AppConfig.oj_base:
+                c.oj_base = c.oj_root.rstrip("/") + "/d/system"
+            self._load_error = ""
             self._config = c
             self._mtime = self._stat_mtime()
             self._mtime_stat = self._mtime
             self._mtime_probe = time.monotonic()
-            self._model_cache.clear()
-            self._notify()
+        self._notify()
+        return True
 
     def _stat_mtime(self) -> float:
         try:
@@ -295,40 +239,17 @@ class ConfigManager:
             return 0.0
 
     def save(self):
-        """保存当前配置到文件（保留 models/model_router 的注释键）"""
+        """Persist settings while retaining unknown fields and stored credentials.
+
+        Runtime/env credentials are never copied into the file.
+        """
         with self._lock:
-            # 尝试读取现有文件以保留注释键
-            existing = {}
-            if self._path.exists():
-                try:
-                    with open(self._path, "r", encoding="utf-8") as f:
-                        existing = json.load(f)
-                except Exception: pass
-            # 由 FIELD_TO_JSON 统一生成，新增配置项不需要再手动登记。
-            # 旧实现是手写字典，漏掉了 benchmark_users / auto_supplement_testdata /
-            # max_cost_per_problem / cost_accum_enable —— 每次 save() 都会把这四项
-            # 从 config.json 里删掉，等于静默丢失用户设置。
-            j = {json_key: getattr(self._config, attr)
-                 for attr, json_key in FIELD_TO_JSON.items()
-                 if hasattr(self._config, attr)}
-            # 不保存敏感字段（凭据由 .env 管理）
-            for sensitive in ("password", "ai_api_key"):
-                j.pop(FIELD_TO_JSON.get(sensitive, sensitive), None)
-            # 保留原有注释键
-            for k in existing:
-                if k.startswith("_") and k not in j:
-                    j[k] = existing[k]
-            # 保留 models 和 model_router 内的注释键
-            for section in ("models", "model_router"):
-                if section in existing and isinstance(existing[section], dict):
-                    for k, v in existing[section].items():
-                        if k.startswith("_") and section in j and isinstance(j[section], dict):
-                            j[section][k] = v
-            # 原子写入：避免进程中断时把 config.json 截断成半个文件
-            tmp = str(self._path) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(j, f, indent=2, ensure_ascii=False)
-            Path(tmp).replace(self._path)
+            existing = read_config(self._path)
+            values = {key: copy.deepcopy(getattr(self._config, attr))
+                      for attr, key in FIELD_TO_JSON.items()
+                      if attr not in ("password", "ai_api_key")}
+            existing.update(values)
+            atomic_write_json(self._path, existing)
             self._mtime = self._stat_mtime()
             self._mtime_stat = self._mtime
 
@@ -341,7 +262,7 @@ class ConfigManager:
         self._mtime_probe = now
         mtime = self._stat_mtime()
         self._mtime_stat = mtime
-        return mtime > self._mtime
+        return mtime != self._mtime
 
     def _start_watcher(self):
         def _watch():
@@ -376,9 +297,8 @@ class ConfigManager:
         with self._lock:
             for k, v in kwargs.items():
                 if hasattr(self._config, k):
-                    setattr(self._config, k, v)
-            # 覆盖可能影响 get_model_config 的合并结果，缓存必须失效
-            self._model_cache.clear()
+                    setattr(self._config, k, copy.deepcopy(v))
+                    self._overrides[k] = copy.deepcopy(v)
 
     def repair(self) -> list[str]:
         """补齐 config.json 中缺失的字段（用 AppConfig 默认值填充），返回新增的字段列表。"""
@@ -406,10 +326,7 @@ class ConfigManager:
 
         if added:
             try:
-                tmp = str(self._path) + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(j, f, indent=2, ensure_ascii=False)
-                Path(tmp).replace(self._path)
+                atomic_write_json(self._path, j)
                 log.info("[配置] 补齐 %d 个缺失字段: %s", len(added), ", ".join(added))
             except Exception as e:
                 log.warning("[配置] 补齐写入失败: %s", e)
@@ -420,17 +337,15 @@ class ConfigManager:
 
     def validate(self) -> list[str]:
         """启动时校验配置，返回警告列表（空=无问题）"""
-        warnings = []
         c = self.cfg
+        warnings = [self._load_error] if self._load_error else []
         if not str(c.oj_root or "").startswith("http"):
             warnings.append("oj_root 不是有效 URL")
         if not str(c.ai_base_url or "").startswith("http"):
             warnings.append("ai_base_url 不是有效 URL")
         if not isinstance(c.verify_timeout, int) or c.verify_timeout <= 0:
             warnings.append("verify_timeout 应 > 0")
-        if not c.models:
-            warnings.append("models 段为空，请配置至少一个模型")
-        else:
+        if c.models:
             for name, md in c.models.items():
                 if name.startswith("_") or not isinstance(md, dict):
                     continue
@@ -450,7 +365,10 @@ class ConfigManager:
         # 检查 model_router tiers 引用的模型是否存在
         router = c.model_router or {}
         tiers = router.get("tiers", {}) if isinstance(router, dict) else {}
-        model_names = {k for k in c.models if not k.startswith("_")}
+        model_names = {k for k in c.models if not k.startswith("_")} | {c.ai_model}
+        if not isinstance(tiers, dict):
+            warnings.append("model_router.tiers 必须是对象")
+            tiers = {}
         for tier, name in tiers.items():
             if name and name not in model_names:
                 warnings.append(f"model_router tiers.{tier} 引用了不存在的模型 '{name}'")
@@ -472,9 +390,6 @@ class ConfigManager:
         """获取指定模型的完整配置，合并模型自身字段与全局默认值。
         返回: {base_url, api_key, max_tokens, reasoning_effort, pricing}"""
         cfg = self.cfg  # Probe reload before consulting the cache.
-        cached = self._model_cache.get(model_name)
-        if cached is not None:
-            return copy.deepcopy(cached)
         md = cfg.models.get(model_name) if cfg.models else None
         if md is None:
             result = dict(base_url=cfg.ai_base_url, api_key=self.api_key,
@@ -485,7 +400,8 @@ class ConfigManager:
                 md = {}
             result = dict(
                 base_url=md.get("base_url") or cfg.ai_base_url,
-                api_key=self._resolve_model_api_key(md.get("api_key")) or self.api_key,
+                api_key=(self._resolve_model_api_key(md["api_key"])
+                         if md.get("api_key") else self.api_key),
                 max_tokens=md.get("max_tokens") or cfg.ai_max_tokens,
                 reasoning_effort=md.get("reasoning_effort")
                     if md.get("reasoning_effort") is not None else cfg.ai_reasoning_effort,
@@ -496,9 +412,7 @@ class ConfigManager:
                         "thinking", "extra_body", "stream_usage", "timeout", "max_retries"):
                 if key in md and md[key] is not None:
                     result[key] = copy.deepcopy(md[key])
-        # 每次 AI 调用都会走这里（经 get_model_base_url / api_key / max_tokens），
-        # 缓存后省掉重复的 dict 拷贝与环境变量解析。
-        self._model_cache[model_name] = result
+        # Resolve environment references each time so credential rotation takes effect.
         return copy.deepcopy(result)
 
     def _resolve_model_api_key(self, val) -> str:
@@ -530,7 +444,7 @@ class ConfigManager:
         for mname, md in (self.cfg.models or {}).items():
             if mname.startswith("_"):
                 continue
-            if md.get("vision"):
+            if isinstance(md, dict) and md.get("vision"):
                 return mname
         return ""
 
@@ -544,7 +458,7 @@ class ConfigManager:
             return True
         # models 段显式标记 vision: true
         md = (self.cfg.models or {}).get(name)
-        if md and md.get("vision"):
+        if isinstance(md, dict) and md.get("vision"):
             return True
         # 命名约定回退：含 vision/视觉 的模型名
         return "vision" in name.lower() or "glm-4.6v" in name.lower()
@@ -554,7 +468,7 @@ class ConfigManager:
         cfg = self.cfg
         router = cfg.model_router or {}
         tiers = router.get("tiers", {})
-        if tier in tiers and tiers[tier]:
+        if isinstance(tiers, dict) and isinstance(tiers.get(tier), str) and tiers[tier]:
             return tiers[tier]
         return os.environ.get(f"AI_MODEL_{tier.upper()}", None)
 
@@ -563,12 +477,12 @@ class ConfigManager:
         cfg = self.cfg
         router = cfg.model_router or {}
         thinking_map = router.get("thinking_levels", {})
-        raw = thinking_map.get(tier)
+        raw = thinking_map.get(tier) if isinstance(thinking_map, dict) else None
         if raw is None:
             raw = os.environ.get(f"AI_THINKING_{tier.upper()}", "")
         if not raw:
             return []
-        return [t.strip() for t in raw.split(",") if t.strip()]
+        return [t.strip() for t in str(raw).split(",") if t.strip()]
 
     @property
     def api_key(self) -> str:
@@ -576,10 +490,15 @@ class ConfigManager:
 
     @staticmethod
     def _resolve_api_key(val: str) -> str:
-        if not val: return ""
-        if "." in val or val != val.upper():
-            return val
-        return os.environ.get(val, "") or os.environ.get("OJ_AI_API_KEY") or os.environ.get("AI_API_KEY", "")
+        if not val:
+            return ""
+        reference = env_reference(val)
+        return os.environ.get(reference, "") if reference is not None else str(val)
+
+    def task_token_limit(self, task: str = "default") -> int:
+        defaults = AppConfig().ai_task_tokens
+        budgets = self.cfg.ai_task_tokens
+        return int(budgets.get(task, budgets.get("default", defaults.get(task, 16384))))
 
     @property
     def lang_ext(self) -> str:

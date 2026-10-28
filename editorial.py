@@ -47,7 +47,10 @@ def enforce_code_block(md: str, code: str, ext: str) -> str:
     - 已有代码块：内容不同则替换为 AC 代码
     - 没有代码块：在末尾补一个
     """
+    heading = re.search(r"(?m)^##\s+代码\s*$", md or "")
     block = find_code_block(md)
+    if heading and (block is None or block[0] < heading.end()):
+        return (md or "").rstrip() + f"\n\n```{ext}\n{code.strip()}\n```\n"
     fenced = f"```{ext}\n{code.strip()}\n```"
     if block is None:
         body = (md or "").rstrip()
@@ -98,16 +101,23 @@ def validate_editorial(md: str, code: str, ext: str = "cpp") -> list[str]:
 class EditorialWriter:
     """把「已 AC 的代码」写成结构化题解，并可定向修复。"""
 
-    def __init__(self, ai, config, call_fn=None):
+    def __init__(self, ai, config, call_fn=None, on_usage=None, cost_exceeded=None):
         self.ai = ai
         self.config = config
+        self.on_usage = on_usage or (lambda result: None)
+        self.cost_exceeded = cost_exceeded or (lambda: False)
         # call_fn(prompt, model, effort) -> str；不传则用 ai.chat
         self._call_fn = call_fn or self._default_call
 
     def _default_call(self, prompt: str, model: str, effort: str) -> str:
+        if self.cost_exceeded():
+            return ""
         r = self.ai.chat([{"role": "system", "content": self.ai._p("editorial_system", "")},
                           {"role": "user", "content": prompt}],
-                         model=model, effort=effort)
+                         model=model, effort=effort,
+                         max_tokens=self.config.task_token_limit("editorial"))
+        if r:
+            self.on_usage(r)
         return (r or {}).get("content", "") or ""
 
     # ── 对外入口 ──
@@ -153,7 +163,7 @@ class EditorialWriter:
         v = verdict or {}
         return tpl.format(
             title=problem.get("title", ""),
-            content=problem.get("content", "")[:6000],
+            content=problem.get("content", ""),
             time_limit=problem.get("time_limit", "?"),
             memory_limit=problem.get("memory_limit", "?"),
             code=code.strip(),
@@ -167,5 +177,9 @@ class EditorialWriter:
 
     def _build_fix_prompt(self, draft: str, issues: list[str], code: str, ext: str) -> str:
         tpl = self.ai._p("editorial_fix", "")
-        return tpl.format(draft=draft[:8000], issues="\n".join(f"- {i}" for i in issues),
-                          code=code.strip()[:6000], ext=ext)
+        block = find_code_block(draft)
+        if block:
+            start, end, _ = block
+            draft = draft[:start] + "（AC 代码由系统插入）" + draft[end:]
+        return tpl.format(draft=draft, issues="\n".join(f"- {i}" for i in issues),
+                          code=code.strip(), ext=ext)

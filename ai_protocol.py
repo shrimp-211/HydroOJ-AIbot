@@ -27,7 +27,7 @@ def build_request(model: str, messages: list, config: dict, *,
         raise ValueError("max_tokens must be positive")
     args = {"model": model, "messages": deepcopy(messages), token_param: limit}
     reasoning = str(effort or config.get("reasoning_effort") or "").split(",")[0].strip()
-    if config.get("supports_reasoning_effort", provider in ("openai", "deepseek")) and reasoning:
+    if config.get("supports_reasoning_effort", provider == "deepseek") and reasoning:
         args["reasoning_effort"] = reasoning
     extra = deepcopy(config.get("extra_body") or {})
     thinking = config.get("thinking")

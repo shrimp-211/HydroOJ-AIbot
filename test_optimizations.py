@@ -515,7 +515,7 @@ class _FakeAI(AIClient):
         return default  # 触发调用方回退到 DEFAULT_PROMPTS
 
     def _call_ai(self, user_prompt, system_msg, use_stream=False, images=None,
-                 model="", effort=""):
+                 model="", effort="", task="solve"):
         model = model or self.config["ai_model"]
         self.models.append(model)
         self.calls.append((model, user_prompt))

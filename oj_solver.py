@@ -9,7 +9,6 @@ import time
 import html
 import base64
 import logging
-import threading
 import argparse
 import requests
 from datetime import datetime
@@ -480,6 +479,15 @@ class SolverOrchestrator:
             return
 
         total_usage, total_elapsed, total_cost = {}, 0.0, 0.0
+        def record_ai(result):
+            nonlocal total_cost, total_elapsed
+            if not result:
+                return
+            for key in ("input", "output", "total", "cache_hit"):
+                total_usage[key] = total_usage.get(key, 0) + result.get("usage", {}).get(key, 0)
+            total_cost += result.get("cost", 0)
+            total_elapsed += result.get("elapsed_s", 0)
+
         all_rids, all_verdicts = [], []
         final_verdict = None
         code, solution_md = "", ""
@@ -552,6 +560,7 @@ class SolverOrchestrator:
                 result = self.ai._call_ai(prompt, self.ai.SYS_SOLVE_EASY, use_stream=use_stream,
                                           images=problem.get("images") or [],
                                           model=route_model, effort=route_thinking)
+            record_ai(result)
             if result and result.get("code"):
                 code = result["code"]; solution_md = result["solution_md"]
                 # 解析 AI 终选的标签
@@ -559,10 +568,6 @@ class SolverOrchestrator:
                 if parsed_tags:
                     candidate_tags = parsed_tags
                 fu = result.get("usage", {})
-                for k in ("input", "output", "total", "cache_hit"):
-                    total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
-                total_elapsed += result.get("elapsed_s", 0)
-                total_cost += result.get("cost", 0)
                 used_model = result.get("model", route_model)
                 used_effort = route_thinking
                 banner = self._code_banner_for(used_model, usage=fu,
@@ -589,19 +594,20 @@ class SolverOrchestrator:
             else:
                 log.info("[路由] 已关闭难度判断，未配置 difficulty_skip_model，"
                          "沿用分层默认: %s", router.default.model)
-        else:
+        elif not is_ac and not self._is_cost_capped(accum_enabled, accum_base, total_cost):
             diff_model = free_model if has_free else self.config["ai_model"]
             log.info("[路由] Phase1 难度判断 (模型=%s) ...", diff_model)
-            diff_prompt = router.DIFFICULTY_PROMPT.format(content=problem.get("content","")[:3000])
-            diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。",
+            diff_prompt = router.DIFFICULTY_PROMPT.format(content=problem.get("content", ""))
+            diff_result = self.ai._call_ai(diff_prompt, "你是题目难度评估专家。仅输出难度和标签两行。",
                                            use_stream=False, images=problem.get("images") or [],
-                                           model=diff_model)
+                                           model=diff_model, task="difficulty")
             if diff_result and diff_result.get("_rate_limited") and has_free:
                 log.info("[*] free 模型限流，切换 %s 判断难度", fallback_model)
                 diff_model = fallback_model
-                diff_result = self.ai._call_ai(diff_prompt, "你是一个题目难度评估专家。仅回复数字。",
+                diff_result = self.ai._call_ai(diff_prompt, "你是题目难度评估专家。仅输出难度和标签两行。",
                                                use_stream=False, images=problem.get("images") or [],
-                                               model=diff_model, effort="high")
+                                               model=diff_model, effort="high", task="difficulty")
+            record_ai(diff_result)
             if diff_result:
                 difficulty, parsed_tags = ModelRouter.parse_diff_and_tags(diff_result.get("raw", ""))
                 if not candidate_tags:
@@ -718,6 +724,7 @@ class SolverOrchestrator:
                                           model=route_model, effort=route_thinking)
                     else:
                         log.warning("[!] 已经是底层模型，无备选")
+                record_ai(result)
                 if not result or not result.get("code"):
                     log.warning("[-] AI 未生成代码"); break
                 code = result["code"]; solution_md = result["solution_md"]
@@ -726,10 +733,6 @@ class SolverOrchestrator:
                 if parsed_tags:
                     final_tags = parsed_tags
                 fu = result.get("usage", {})
-                for k in ("input", "output", "total", "cache_hit"):
-                    total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
-                total_elapsed += result.get("elapsed_s", 0)
-                total_cost += result.get("cost", 0)
                 used_model = result.get("model", route_model)
                 used_effort = route_thinking
                 banner = self._code_banner_for(used_model, usage=fu,
@@ -769,7 +772,10 @@ class SolverOrchestrator:
                     fix = self.ai.fix(problem, code, solution_md, verdict, fix_i + 1,
                                       use_stream=use_stream, history=history, difficulty=difficulty,
                                       model=route_model, effort=route_thinking)
-                    if not fix: log.warning("[-] 修正失败"); break
+                    record_ai(fix)
+                    if not fix or not fix.get("code"):
+                        log.warning("[-] 修正失败或回复不完整")
+                        break
                     code = fix["code"]; solution_md = fix["solution_md"]
                     # 解析修正后 AI 最终选定的标签（二次筛选）
                     parsed_tags, solution_md = _extract_tag_prefix(solution_md)
@@ -777,11 +783,6 @@ class SolverOrchestrator:
                         final_tags = parsed_tags
                     history.append({"role": "user", "content": f"评测: 得分{verdict['score']}, {verdict.get('case_summary','')}"})
                     history.append({"role": "assistant", "content": solution_md})
-                    fu = fix.get("usage", {})
-                    for k in ("input", "output", "total", "cache_hit"):
-                        total_usage[k] = total_usage.get(k, 0) + fu.get(k, 0)
-                    total_elapsed += fix.get("elapsed_s", 0)
-                    total_cost += fix.get("cost", 0)
                     if fix.get("model"):
                         used_model = fix["model"]
 
@@ -792,11 +793,7 @@ class SolverOrchestrator:
 
         # 代码混淆（仅 AC 后、发布题解前）
         obf_code = None
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                obf_config = json.load(f).get("code_obfuscate", {})
-        except Exception:
-            obf_config = {}
+        obf_config = self.config.get("code_obfuscate", {})
         if is_ac and code and obf_config.get("enabled"):
             # 用免费模型做混淆（显式传参，不改动全局配置）
             log.info("[*] 调用 AI 混淆代码 (免费模型: %s) ...", free_model)
@@ -804,6 +801,7 @@ class SolverOrchestrator:
             if obf and obf.get("_rate_limited") and has_free:
                 log.info("[*] free 模型限流，切换 %s 混淆", fallback_model)
                 obf = self.ai.obfuscate(code, model=fallback_model, effort="high")
+            record_ai(obf)
             if obf and obf.get("code"):
                 obf_code = obf["code"]
                 log.info("[+] 混淆完成，%d 字符 → %d 字符", len(code), len(obf_code))
@@ -823,7 +821,8 @@ class SolverOrchestrator:
             solution_md = self._write_editorial(
                 problem, code, final_verdict, difficulty, candidate_tags,
                 solution_md, used_model, used_effort, journal,
-                time_limit=problem.get("time_limit", ""))
+                time_limit=problem.get("time_limit", ""), on_usage=record_ai,
+                cost_exceeded=lambda: self._is_cost_capped(accum_enabled, accum_base, total_cost))
 
         if post and solution_md:
             # 插入难度标签
@@ -882,7 +881,7 @@ class SolverOrchestrator:
     def _write_editorial(self, problem: dict, code: str, verdict: dict | None,
                          difficulty: int, tags: list, fallback_md: str,
                          used_model: str, used_effort: str, journal: list,
-                         time_limit: str = "") -> str:
+                         time_limit: str = "", on_usage=None, cost_exceeded=None) -> str:
         """AC 之后重写题解：结构固定、代码与 AC 版本逐字一致。
 
         与原行为的关系：求解时模型的输出（含试错过程）只作为兜底；
@@ -899,7 +898,7 @@ class SolverOrchestrator:
         effort = used_effort if model == used_model else ""
         log.info("[题解] 生成结构化题解（模型=%s）...", model or self.config["ai_model"])
         try:
-            md = EditorialWriter(self.ai, self.config).write(
+            md = EditorialWriter(self.ai, self.config, on_usage=on_usage, cost_exceeded=cost_exceeded).write(
                 problem, code, verdict=verdict, difficulty=difficulty, tags=tags,
                 journal=journal, model=model, effort=effort, fallback=fallback_md)
         except Exception as e:
@@ -943,7 +942,9 @@ class SolverOrchestrator:
             banner_fn=lambda model, effort, usage, cost: self._code_banner_for(
                 model, usage=usage, cost=cost, effort=effort),
             cost_exceeded=lambda: self._is_cost_capped(
-                accum_enabled, accum_base, session_cost()))
+                accum_enabled, accum_base, session_cost()),
+            remaining_budget=lambda: (float(self.config.max_cost_per_problem) - accum_base - session_cost()
+                                      if accum_enabled else float("inf")))
 
     def _is_cost_capped(self, enabled: bool, accum_base: float, session_cost: float) -> bool:
         """单题费用是否已达上限（累计历史 + 本次会话）。
