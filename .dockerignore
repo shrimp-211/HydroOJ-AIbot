@@ -1,0 +1,25 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+.env
+.env.*
+.ssh
+config.json
+config (*).json
+*.pem
+*.key
+id_ed25519*
+dashboard.json
+cost_accum.json
+*processed*.json
+.oj_cookies*
+logs
+agent_work
+td_output_*
+data
+backups
+*.log
+*.tmp

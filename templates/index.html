@@ -155,6 +155,7 @@ textarea { font-family: var(--mono); font-size: 12px; }
     <div class="card">
       <h2>监控守护</h2>
       <label>监测域名（逗号分隔）</label><input id="cfg-mon-domains" placeholder="system, yuanyi__contestForPrimary">
+      <label>比赛列表起始页</label><input id="cfg-contest-page" type="number" min="1" value="2">
       <label>检查间隔（秒）</label><input id="cfg-mon-interval" type="number">
       <label>状态文件</label><input id="cfg-mon-state" placeholder="processed_contests.json">
     </div>
@@ -169,7 +170,7 @@ textarea { font-family: var(--mono); font-size: 12px; }
     </div>
     <div class="card">
       <h2>访问设置</h2>
-      <label>WebUI 访问令牌（仅启用 --auth-token 时填写）</label>
+      <label>WebUI 访问令牌（--auth-token 或 WEBUI_AUTH_TOKEN）</label>
       <input id="cfg-web-token" type="password" autocomplete="off" oninput="sessionStorage.setItem('oj-auth', this.value)">
       <p class="small mt8">令牌只保存在当前浏览器会话。服务端环境变量优先于这里保存的配置。</p>
       <pre id="cfg-diagnostics" style="white-space:pre-wrap;margin-top:12px"></pre>
@@ -301,7 +302,7 @@ async function loadConfig() {
     const fields = {'oj-root':'oj_root', 'oj-base':'oj_base', 'oj-user':'username',
       'ai-url':'ai_base_url', 'ai-model':'ai_model', 'ai-reasoning':'ai_reasoning_effort',
       'ai-maxtok':'ai_max_tokens', 'code-lang':'code_lang', 'mon-interval':'monitor_interval',
-      'mon-state':'monitor_state_file'};
+      'mon-state':'monitor_state_file', 'contest-page':'contest_start_page'};
     for (const [id, key] of Object.entries(fields)) document.getElementById('cfg-'+id).value = c[key] ?? '';
     for (const [id, configured] of [['ai-key', c.ai_api_key_configured], ['oj-pass', c.password_configured]]) {
       const input = document.getElementById('cfg-'+id);
@@ -324,7 +325,7 @@ async function saveConfig() {
     ai_base_url:value('ai-url'), ai_model:value('ai-model'), ai_reasoning_effort:value('ai-reasoning'),
     ai_max_tokens:Number(value('ai-maxtok')), code_lang:value('code-lang'),
     monitor_domains:value('mon-domains').split(',').map(s=>s.trim()).filter(Boolean),
-    monitor_interval:Number(value('mon-interval')), monitor_state_file:value('mon-state'),
+    contest_start_page:Number(value('contest-page')), monitor_interval:Number(value('mon-interval')), monitor_state_file:value('mon-state'),
     ai_task_tokens:{solve:Number(value('solve-budget')), plan:Number(value('plan-budget')), editorial:Number(value('editorial-budget'))},
     difficulty_detect_enable:document.getElementById('cfg-detect').checked,
     compact_history:document.getElementById('cfg-compact').checked

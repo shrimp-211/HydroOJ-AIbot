@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from config_io import read_config, atomic_write_json, env_reference
+from runtime_paths import data_file
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class AppConfig:
     # Monitor
     monitor_domains: list[str] = field(default_factory=lambda: ["system"])
     monitor_interval: int = 120
+    contest_start_page: int = 2
     monitor_state_file: str = "processed_contests.json"
     # Message
     msg_whitelist: list[int] = field(default_factory=lambda: [2])
@@ -91,9 +93,9 @@ JSON_TO_FIELD = {value: key for key, value in FIELD_TO_JSON.items()}
 class ConfigManager:
     """配置管理器 — 支持 JSON 文件 + 环境变量 + 热重载"""
 
-    def __init__(self, config_path: str = "config.json", auto_reload: bool = False,
+    def __init__(self, config_path: str | None = None, auto_reload: bool = False,
                  cli_overrides: dict | None = None):
-        self._path = Path(config_path)
+        self._path = Path(config_path) if config_path is not None else data_file("config.json")
         self._config = AppConfig()
         self._lock = threading.RLock()
         self._mtime: float = 0
@@ -197,6 +199,7 @@ class ConfigManager:
                 "ai_max_tokens": ["OJ_AI_MAX_TOKENS", "AI_MAX_TOKENS"],
                 "ai_vision_model": ["OJ_AI_VISION_MODEL"],
                 "cookie_jar": ["OJ_COOKIE_JAR"],
+                "contest_start_page": ["OJ_CONTEST_START_PAGE"],
                 "difficulty_detect_enable": ["OJ_DIFFICULTY_DETECT", "DIFFICULTY_DETECT"],
                 "difficulty_skip_model": ["OJ_DIFFICULTY_SKIP_MODEL", "DIFFICULTY_SKIP_MODEL"],
                 "agent_enabled": ["OJ_AGENT_ENABLE", "AGENT_ENABLE"],
@@ -345,6 +348,8 @@ class ConfigManager:
             warnings.append("ai_base_url 不是有效 URL")
         if not isinstance(c.verify_timeout, int) or c.verify_timeout <= 0:
             warnings.append("verify_timeout 应 > 0")
+        if type(c.contest_start_page) is not int or c.contest_start_page < 1:
+            warnings.append("contest_start_page 必须是正整数")
         if c.models:
             for name, md in c.models.items():
                 if name.startswith("_") or not isinstance(md, dict):

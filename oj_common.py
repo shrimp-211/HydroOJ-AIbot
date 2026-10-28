@@ -3,6 +3,7 @@ OJ Solver — 共享模块
 提供所有脚本共用的：配置加载、登录、Cookie 管理、日志配置
 """
 
+from runtime_paths import data_file
 import os
 import re
 import json
@@ -240,13 +241,13 @@ def accum_add(pid, cost: float) -> float:
 # ═══════════════════════════════════════════════════════════════
 # .env 加载
 # ═══════════════════════════════════════════════════════════════
-def load_dotenv(env_path: str = ".env"):
+def load_dotenv(env_path: str | None = None):
     """加载 .env 文件到 os.environ（已存在的变量不覆盖）。
 
     支持 `export KEY=value`、行内注释、单双引号包裹的值，以及 Windows 下
     用记事本保存出的 UTF-8 BOM。
     """
-    p = Path(env_path)
+    p = Path(env_path) if env_path is not None else data_file(".env")
     if not p.exists():
         return
     with open(p, "r", encoding="utf-8-sig") as f:
@@ -276,13 +277,10 @@ def load_dotenv(env_path: str = ".env"):
 # ═══════════════════════════════════════════════════════════════
 # 配置加载
 # ═══════════════════════════════════════════════════════════════
-def load_config(config_path: str = "config.json") -> dict:
-    """从 JSON 文件加载配置（文件不存在则返回空）"""
-    p = Path(config_path)
-    if p.exists():
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+def load_config(config_path: str | None = None) -> dict:
+    """Read the shared config location, including legacy field normalization."""
+    from config_io import read_config
+    return read_config(config_path if config_path is not None else data_file("config.json"))
 
 
 # ═══════════════════════════════════════════════════════════════

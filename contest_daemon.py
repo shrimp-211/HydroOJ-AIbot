@@ -15,7 +15,9 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 import requests
-from oj_common import (load_dotenv, load_config, create_session, oj_login,
+from contest_catalog import list_contests, positive_int
+from runtime_paths import data_dir
+from oj_common import (load_dotenv, create_session,
                         parse_contest_or_problem, parse_problem_url, smart_login)
 
 log = logging.getLogger(__name__)
@@ -43,38 +45,6 @@ def _script_dir() -> Path:
 
 
 # ═══════════════════════════════════════════════════
-# 配置
-# ═══════════════════════════════════════════════════
-def _get_defaults():
-    cfg = load_config()
-    mon = cfg.get("monitor", {})
-    return (
-        cfg.get("monitor_domains") or mon.get("domains", ["system"]),
-        cfg.get("monitor_interval") or mon.get("interval", 120),
-        cfg.get("monitor_state_file") or mon.get("state_file", "processed_contests.json"),
-    )
-DEFAULT_DOMAINS, DEFAULT_INTERVAL, DEFAULT_STATE_FILE = _get_defaults()
-
-
-# ═══════════════════════════════════════════════════
-# 比赛列表
-# ═══════════════════════════════════════════════════
-def list_contests(session, root: str, domain: str, max_pages: int = 20) -> list:
-    all_contests, page = [], 1
-    while page <= max_pages:
-        r = session.get(f"{root}/d/{domain}/contest",
-                        headers={"Accept": "application/json"},
-                        params={"page": page, "limit": 50}, timeout=30)
-        if r.status_code != 200: break
-        tdocs = r.json().get("tdocs", [])
-        if not tdocs: break
-        all_contests.extend(tdocs)
-        if len(tdocs) < 50: break
-        page += 1
-    return all_contests
-
-
-# ═══════════════════════════════════════════════════
 # 状态
 # ═══════════════════════════════════════════════════
 def load_state(path: str) -> set:
@@ -96,7 +66,8 @@ def save_state(path: str, s: set):
 # 核心
 # ═══════════════════════════════════════════════════
 def check_contests(root: str, domains: list, processed: set,
-                   username: str, password: str, include_ongoing: bool = True) -> list:
+                   username: str, password: str, include_ongoing: bool = True,
+                   start_page: int = 2) -> list:
     session = create_session(verify_ssl=False)
     log.info("[*] 登录 %s ...", root)
     if not smart_login(session, root, username, password):
@@ -107,7 +78,7 @@ def check_contests(root: str, domains: list, processed: set,
     for domain in domains:
         log.info("[*] 检查 domain=%s ...", domain)
         try:
-            contests = list_contests(session, root, domain)
+            contests = list_contests(session, root, domain, start_page=start_page)
         except requests.RequestException as e:
             log.warning("  [!] 获取列表异常: %s", e); continue
         log.info("    找到 %d 个比赛", len(contests))
@@ -155,7 +126,7 @@ def process_contest(contest: dict, solver_path: str, push_list: set = None) -> b
     if push_list:
         env["OJ_PUSH_LIST"] = ",".join(str(x) for x in push_list)
     r = subprocess.run([sys.executable, solver_path, url],
-                       cwd=str(Path(solver_path).parent), env=env)
+                       cwd=str(data_dir(Path(solver_path).parent)), env=env)
     if r.returncode == 0:
         log.info("[+] 完成: %s", title); return True
     log.error("[-] 失败 (exit %d): %s", r.returncode, title); return False
@@ -169,10 +140,12 @@ def main():
     from oj_common import setup_logging
     setup_logging(name="daemon")
     parser = argparse.ArgumentParser(description="比赛守护进程")
-    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL)
+    parser.add_argument("--interval", type=int, default=None)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--start-page", type=positive_int, default=None,
+                        help="比赛列表起始页（默认读取 contest_start_page，缺省为2）")
     parser.add_argument("--domain", action="append", dest="domains")
-    parser.add_argument("--state-file", default=DEFAULT_STATE_FILE)
+    parser.add_argument("--state-file", default=None)
     parser.add_argument("--root", help="OJ 根地址")
     parser.add_argument("--ended-only", action="store_true", help="仅处理已结束的比赛")
     parser.add_argument("--no-interactive", action="store_true", help="禁用交互终端输入")
@@ -249,7 +222,8 @@ def main():
     def run_check():
         nonlocal processed
         log.info("\n" + "─" * 50 + f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] 检查中...")
-        pending = check_contests(root, domains, processed, username, password, include_ongoing=include_ongoing)
+        pending = check_contests(root, domains, processed, username, password, include_ongoing=include_ongoing,
+                                 start_page=args.start_page or c.contest_start_page)
         if not pending: log.info("[*] 无待处理比赛"); return
         log.info("\n[*] 发现 %d 个待处理比赛（%d 线程并发）", len(pending), len(pending))
 
@@ -280,8 +254,8 @@ def main():
                 log.info("[*] 自动标程题解扫描 ...")
                 sp_bm = str(_script_dir() / "benchmark_solver.py")
                 try:
-                    subprocess.run([sys.executable, sp_bm],
-                                   cwd=str(Path(sp_bm).parent),
+                    subprocess.run([sys.executable, sp_bm, "--start-page", str(args.start_page or c.contest_start_page)],
+                                   cwd=str(data_dir(Path(sp_bm).parent)),
                                    env=os.environ.copy(), timeout=600)
                 except Exception:
                     pass
@@ -418,7 +392,7 @@ def main():
                 env2["OJ_USERNAME"] = os.environ.get("OJ_USERNAME","")
                 env2["OJ_PASSWORD"] = os.environ.get("OJ_PASSWORD","")
             subprocess.Popen([sys.executable, sp_td, url],
-                            cwd=str(Path(sp_td).parent), env=env2)
+                            cwd=str(data_dir(Path(sp_td).parent)), env=env2)
             return f"🔄 测试数据补充已启动: {url}"
 
         if parts[0].lower() == "bm":
@@ -431,8 +405,8 @@ def main():
                 env2["OJ_REQUESTER"] = str(reply_uid)
                 env2["OJ_USERNAME"] = os.environ.get("OJ_USERNAME","")
                 env2["OJ_PASSWORD"] = os.environ.get("OJ_PASSWORD","")
-            subprocess.Popen([sys.executable, sp_bm] + ([target] if target else []),
-                            cwd=str(Path(sp_bm).parent), env=env2)
+            subprocess.Popen([sys.executable, sp_bm, "--start-page", str(args.start_page or c.contest_start_page)] + ([target] if target else []),
+                            cwd=str(data_dir(Path(sp_bm).parent)), env=env2)
             return f"🔄 标程题解生成已启动" + (f": {target}" if target else " (全扫)")
 
         if cmd.lower() in ("list",):
@@ -467,7 +441,7 @@ def main():
             dash.problem_start(pid, title=info.get("title", ""))
             try:
                 subprocess.Popen([sys.executable, sp_one, url, "--no-show-thinking"],
-                                cwd=str(Path(sp_one).parent), env=env)
+                                cwd=str(data_dir(Path(sp_one).parent)), env=env)
             except OSError as e:
                 return f"❌ #{pid} 启动失败: {e}"
             return f"🔄 #{pid} 已开始求解，完成后会自动回复结果"
@@ -477,7 +451,7 @@ def main():
             log.info("[*] 求解: %s", title)
             try:
                 subprocess.Popen([sys.executable, str(sp), url, "--no-accum"],
-                                cwd=str(Path(sp).parent), env=env)
+                                cwd=str(data_dir(Path(sp).parent)), env=env)
             except OSError as e:
                 return f"❌ {title} 启动失败: {e}"
             return f"🔄 {title} 已启动（{len(info.get('pids',[]))}题），完成后会自动回复结果"

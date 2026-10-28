@@ -11,7 +11,7 @@ LEGACY_SECTIONS = {
     'ai': {'base_url': 'ai_base_url', 'model': 'ai_model', 'ai_api_key': 'ai_api_key',
            'api_key': 'ai_api_key', 'max_tokens': 'ai_max_tokens', 'reasoning_effort': 'ai_reasoning_effort'},
     'code': {'lang': 'code_lang'},
-    'monitor': {'domains': 'monitor_domains', 'interval': 'monitor_interval', 'state_file': 'monitor_state_file'},
+    'monitor': {'domains': 'monitor_domains', 'interval': 'monitor_interval', 'state_file': 'monitor_state_file', 'start_page': 'contest_start_page'},
 }
 
 
@@ -104,7 +104,7 @@ def validate_document(data: dict) -> list[str]:
     for key in ('oj_root', 'oj_base', 'ai_base_url'):
         if key in data and not _valid_url(data[key]):
             errors.append(f'{key}: 需要 http(s) URL')
-    for key in ('ai_max_tokens', 'verify_timeout', 'monitor_interval', 'agent_max_steps',
+    for key in ('ai_max_tokens', 'verify_timeout', 'monitor_interval', 'contest_start_page', 'agent_max_steps',
                 'agent_max_submissions', 'agent_max_seconds', 'agent_run_timeout', 'solve_candidates'):
         if key in data and (type(data[key]) is not int or data[key] <= 0):
             errors.append(f'{key}: 必须是正整数')

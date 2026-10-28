@@ -1,428 +1,407 @@
-# HydroOJ AIbot — OJ 自动解题 & 题解发布系统
+# HydroOJ AIbot
 
-基于多种 AI 模型的 Hydro OJ 自动化工具，支持自动解题、题解发布、比赛监控、私信交互、测试数据补充、标程题解生成等功能。
+为 Hydro OJ 提供 AI 解题、比赛监控、标程题解生成与测试数据补充。支持多模型路由、本地编译与对拍、结构化题解、token / 费用统计，以及 Web 配置和统计页面。
 
-## 功能概览
+## 功能与运行方式
 
-### 核心功能
-- **AI 自动解题**: 8 级难度评估 + 三层模型路由（flash/pro/max），自动生成题解并发布
-- **比赛守护进程**: 自动监控多个域的比赛，批量求解并推送通知
-- **私信后端**: 白名单用户可通过 OJ 私信远程控制，支持实时指令交互
-- **测试数据补充**: 自动为无测试数据的题目生成样例、std.cpp、data.cpp 并上传
-- **标程题解生成**: 自动扫描比赛排行榜，检测标程用户满分题，AI 解读后发布
+| 功能 | 入口 | 说明 |
+| --- | --- | --- |
+| 单题求解 | `oj_solver.py` | 获取题面、生成代码、验证、提交，AC 后发布题解 |
+| 比赛 / 训练批量处理 | `contest_solver.py` | 多线程求解指定链接中的题目 |
+| 比赛监控 | `contest_daemon.py` | 轮询多域比赛，支持控制台和 OJ 私信指令 |
+| 标程题解 | `benchmark_solver.py` | 扫描指定用户的满分提交，解读代码并发布 |
+| 测试数据补充 | `testdata_supplement.py` | 为缺数据题目生成样例、标程和生成器 |
+| 配置初始化 / 诊断 | `config_cli.py` | 生成单模型配置，离线检查参数与密钥引用 |
+| Web 面板 | `webui.py` | 配置、诊断、统计与运行日志 |
+| OneBot 接入 | `onebot_server.py` | 接收消息指令并调用求解脚本 |
 
-### 模型管理
-- **多模型独立配置**: 每模型可设独立 base_url、api_key、max_tokens、reasoning_effort、定价
-- **8 级难度系统**: 入门→普及−→普及/提高−→普及+/提高→提高→提高+/省选−→省选/NOI−→NOI/CTSC
-- **自动限流切换**: 429 限流时自动降级模型（free→flash, max→pro→flash）
-- **费用追踪**: 每模型独立定价（含峰谷价），单题累计费用上限（默认5元，跨调用/跨比赛检测长期累计）
+所有命令请在项目目录运行。Docker 已设置独立的数据目录，无需手动管理工作路径。
 
-### 多域支持
-- 所有 OJ API 请求自动适配 system 和非 system 域
-- 记录 URL、题目获取、题解发布、文件上传均支持跨域
+## 本地安装
 
----
+需要 Python **3.10+**。C++ 本地验证需要 `g++` 或 `clang++`；没有工具链时会回退到原求解流程。Python 本地验证使用当前 Python 环境。
 
-## 快速开始
+```bash
+git clone https://github.com/shrimp-211/HydroOJ-AIbot.git
+cd HydroOJ-AIbot
+python -m venv .venv
+```
 
-### 1. 环境配置
+激活虚拟环境：
 
-建议先创建单模型配置（需要 Python 3.10+）：
+```bash
+# Linux / macOS
+source .venv/bin/activate
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+安装依赖并初始化。把下列模型名和两个 URL 换成实际值：
 
 ```bash
 pip install -r requirements.txt
 python config_cli.py init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example --profile economy
-# 填写生成的 .env：OJ_USERNAME、OJ_PASSWORD、AI_API_KEY
-python config_cli.py doctor
-python webui.py
 ```
 
-`init` 不覆盖已有配置或 `.env`。`economy` 关闭单独的难度判断、使用两条候选思路，
-保留本地验证、对拍和结构化题解；`balanced` 保留难度判断与三条候选。
-供应商可用 `--provider openai|deepseek|zhipu|compatible` 指定（默认兼容端点）。
-已有多模型配置可继续使用；下方是手动配置方式。
+`init` 创建 `config.json` 和空白 `.env`，不会覆盖已有文件。在 `.env` 填写：
 
-```bash
-# 安装依赖
-pip install -r requirements.txt
-
-# 编辑 .env
-OJ_ROOT=https://your-oj-instance.com
+```dotenv
 OJ_USERNAME=your_username
 OJ_PASSWORD=your_password
-AI_API_KEY=sk-xxx
-AI_MODEL=deepseek-v4-pro
-DEEPSEEK_API_KEY=sk-xxx
-ZHIPU_API_KEY=your_zhipu_key
+AI_API_KEY=your_api_key
 ```
 
-### 2. 单题求解
+然后检查并尝试获取一道题：
 
 ```bash
-python oj_solver.py "https://your-oj-instance.com/p/1000"
-python oj_solver.py 1000  # 简写
+python config_cli.py doctor
+python oj_solver.py https://your-oj.example/p/1000 --dry-run
+python oj_solver.py https://your-oj.example/p/1000
 ```
 
-### 3. 比赛批量求解
+`doctor` 不访问 OJ 或 AI 服务，也不产生模型费用；通过只表示本地配置完整，不代表账号权限或远端服务可用。`--dry-run` 只获取题面，不请求 AI。
+
+已有配置可直接保留，也可参考 [完整配置示例](config.example.json)。指定其他配置文件执行初始化或诊断：
 
 ```bash
-python contest_solver.py "https://your-oj-instance.com/d/system/contest/xxx"
-
-# 手动触发时可忽略单题金额累计（不检查累计上限）
-python contest_solver.py "https://.../contest/xxx" --no-accum
+python config_cli.py --config path/to/config.json doctor --json
 ```
 
-### 4. 启动守护进程
+## Docker / Compose 部署
+
+需要能运行 Linux 容器的 Docker Engine / Docker Desktop，以及 Docker Compose v2。仓库提供 `Dockerfile`、`compose.yaml`、`.dockerignore` 和 [.env.docker.example](.env.docker.example)。镜像基于 Python 3.12，包含 `g++`，以 UID/GID **10001:10001** 运行。
+
+### 首次启动
+
+在仓库目录复制环境变量模板：
 
 ```bash
-python contest_daemon.py --interval 120
+# Linux / macOS
+cp .env.docker.example .env
+# Windows PowerShell
+Copy-Item .env.docker.example .env
 ```
 
----
+填写 `.env` 的 `OJ_USERNAME`、`OJ_PASSWORD`、`AI_API_KEY`、`WEBUI_AUTH_TOKEN`。
+`WEBUI_AUTH_TOKEN` 请设置为自行生成的随机字符串；Compose 会拒绝使用空令牌启动。
+已有 `.env` 时保留它并补充 `WEBUI_AUTH_TOKEN`，不要用模板覆盖凭据。
 
-## 配置说明 (`config.json`)
+```bash
+docker compose build
+docker compose run --rm cli init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example --profile economy
+docker compose run --rm cli doctor
+docker compose up -d web
+```
+
+打开 [http://127.0.0.1:5000](http://127.0.0.1:5000)，进入「配置 → 访问设置」，填写 `WEBUI_AUTH_TOKEN` 后刷新配置。
+`.env` 的 `WEBUI_PORT` 可修改宿主机端口，例如 `WEBUI_PORT=8080`。
+
+默认只启动 Web 面板。要开启比赛自动处理，再执行：
+
+```bash
+docker compose --profile worker up -d
+```
+
+守护进程默认包含进行中的比赛。只处理已结束的比赛，可把 `compose.yaml` 的 daemon 命令改为：
+
+```yaml
+command: [daemon, --no-interactive, --ended-only]
+```
+
+Compose 的 profiles 用法见 [Docker 官方文档](https://docs.docker.com/compose/how-tos/profiles/)。
+
+### 容器命令
+
+`cli` 仅用于一次性任务，不会随普通 `up` 自动启动：
+
+```bash
+docker compose run --rm cli doctor --json
+docker compose run --rm cli solve https://your-oj.example/p/1000
+docker compose run --rm cli contest https://your-oj.example/contest/CONTEST_ID --workers 2
+docker compose run --rm cli benchmark --start-page 2
+docker compose run --rm cli testdata https://your-oj.example/p/1000
+docker compose run --rm cli daemon --once --no-msg-backend --start-page 1
+```
+
+容器入口还支持 `web`、`onebot`、`config` 和 `python`。例如：
+
+```bash
+docker compose run --rm cli config --help
+docker compose run --rm cli solve --help
+```
+
+直接使用 Docker 时，使用同一命名卷并传入 `.env`：
+
+```bash
+docker build -t hydrooj-aibot:local .
+docker run --rm --init --env-file .env -v hydrooj-data:/data hydrooj-aibot:local init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example
+docker run --rm --init --env-file .env -v hydrooj-data:/data hydrooj-aibot:local doctor
+```
+
+直接 Docker 示例与 Compose 创建的卷相互独立；请固定使用同一种部署方式或明确迁移数据。
+
+### 数据、升级与备份
+
+- `/app`：镜像中的代码与提示词；升级镜像会更新它们。
+- `/data`：命名卷，保存 `config.json`、费用统计、处理记录、Cookie、日志、本地验证目录和生成数据。
+- 宿主机 `.env`：由 Compose 注入环境变量，不会复制到镜像。变量优先于卷内 JSON 配置；修改后需要重新创建服务。
+
+```bash
+# 查看状态和日志
+docker compose ps
+docker compose logs -f web daemon
+
+# 拉取更新、重建并启动
+git pull --ff-only
+docker compose build
+docker compose --profile worker up -d --force-recreate
+
+# 停止服务，保留数据卷
+docker compose --profile worker down
+```
+
+备份时先停止 daemon，保持 web 容器可用于复制，避免后台任务同时写入。创建宿主机 `backups` 目录后执行：
+
+```bash
+docker compose stop daemon
+docker compose cp web:/data/. ./backups/
+```
+
+恢复到现有 web 容器时：
+
+```bash
+docker compose stop daemon
+docker compose cp ./backups/. web:/data/
+docker compose run --rm --user 0 --cap-add CHOWN --entrypoint chown cli -R 10001:10001 /data
+docker compose --profile worker up -d
+```
+
+`down -v` 会删除数据卷；普通 `down` 会保留数据。详细卷管理见 [Docker 数据卷文档](https://docs.docker.com/engine/storage/volumes/)。
+默认端口仅绑定宿主机 `127.0.0.1`；远程访问建议使用 SSH 隧道或带 HTTPS 的反向代理。Web 服务用于管理面板，当前使用 Werkzeug 服务端。
+
+## 比赛列表：默认从第 2 页获取
+
+守护进程和标程全量扫描共用同一分页实现，首次请求为：
+
+```text
+/d/<domain>/contest?page=2&limit=50
+```
+
+起始页包含在扫描范围内，后续继续逐页读取，最多读取 20 页；遇到空页、短页或重复页停止。
+**默认跳过第 1 页**；需要包含最新首页比赛时，设置为 `1`。指定某个比赛完整链接求解不受此设置影响。
+
+三种配置方式，优先级为 **命令行 > 环境变量 > config.json > 默认 2**：
 
 ```json
 {
-  "oj_root": "OJ 根地址",
-  "ai_model": "默认模型名",
-  "monitor_domains": ["system", "your_domain"],
-  "monitor_interval": 120,
-  "msg_whitelist": [2, 35],
-  "msg_push_list": [2, 35],
-  "msg_superuser": [2, 35],
-  "benchmark_users": [2],
-  "max_cost_per_problem": 5.0,
-  "cost_accum_enable": true,
-  "auto_supplement_testdata": false,
-  "difficulty_detect_enable": true,
-  "difficulty_skip_model": "",
-  "model_router": {
-    "tiers": { "flash": "...", "pro": "...", "max": "..." }
-  },
+  "contest_start_page": 2
+}
+```
+
+```dotenv
+OJ_CONTEST_START_PAGE=1
+```
+
+```bash
+python contest_daemon.py --start-page 1
+python benchmark_solver.py --start-page 3
+# Docker 单次运行覆盖
+docker compose run --rm cli daemon --once --start-page 1
+```
+
+Web 配置页的「监控守护 → 比赛列表起始页」可直接修改 JSON 值。必须填写大于等于 1 的整数。
+
+## AI 配置与 token 预算
+
+### 初始化预设
+
+| 预设 | 难度判断 | 每层候选思路 | 本地验证、对拍、结构化题解 |
+| --- | --- | ---: | --- |
+| `economy` | 关闭 | 2 | 保留 |
+| `balanced` | 开启 | 3 | 保留 |
+
+预设只在 `init` 时写入设置，之后可以逐项调整。单模型无需额外的多模型路由设置。
+`--provider` 可指定 `compatible`（默认）、`openai`、`deepseek`、`zhipu`。
+
+### 配置优先级与凭据
+
+命令行 / 运行时覆盖 > 环境变量 > JSON > 默认值。命令行覆盖在热重载后仍有效；JSON 解析失败时保留上一份有效配置。
+模型独立字段覆盖全局 AI 默认值。默认读当前工作目录的配置；`OJ_DATA_DIR` 可指定独立数据目录，Docker 固定为 `/data`。
+
+推荐在 JSON 中引用环境变量，不直接保存密钥：
+
+```json
+{
+  "ai_api_key": "env:AI_API_KEY",
   "models": {
-    "glm-4.6v-flash": { "base_url": "...", "pricing": {...} },
-    "deepseek-v4-pro": { "base_url": "...", "pricing": {...} },
-    "deepseek-v4-flash": { "base_url": "...", "pricing": {...} },
-    "glm-5.2": { "base_url": "...", "pricing": {...} }
+    "YOUR_MODEL": {
+      "base_url": "https://your-api.example/v1",
+      "api_key": "env:PROVIDER_API_KEY",
+      "provider": "compatible",
+      "max_tokens": 16384
+    }
   }
 }
 ```
 
----
+支持 `env:NAME`、`${NAME}` 和旧的大写变量名格式。显式引用缺失时不会使用其他服务的全局密钥。
+Web 配置接口不返回密码或模型密钥原文；留空表示保留现有凭据。
 
-## 单题费用累计
+### 模型协议参数
 
-`max_cost_per_problem`（默认 ¥5）按题目**长期累计**，持久化在 `cost_accum.json`（自动忽略）：
+这些可选字段位于 `models.<模型名>`：
 
-- **自动求解**（比赛/守护进程批量）: 每次求解结束后把费用累加到该题，跨调用生效——同一题被不同比赛反复检测时，金额持续累计，不会重复重置
-- **达到上限后**立即停止后续 AI 调用，推送 💰 提示；该题被视为完成，不阻止比赛标记
-- **手动触发忽略累计**: 命令行 `oj_solver.py` 以及守护进程交互/私信触发的求解，不检查累计限额
-  - 手动批量可用 `contest_solver.py ... --no-accum` 显式忽略
-- **全局关闭**: `config.json` 设 `"cost_accum_enable": false`（此时仅按单次会话限额）
+| 字段 | 用途 |
+| --- | --- |
+| `provider` | `auto` / `openai` / `deepseek` / `zhipu` / `compatible`；auto 只识别官方主机名 |
+| `token_parameter` | `max_tokens` 或 `max_completion_tokens`；默认按 provider 选择 |
+| `reasoning_effort` | 模型支持的推理强度；留空不传 |
+| `supports_reasoning_effort` | 是否传推理强度；OpenAI / 代理模型需按能力显式开启 |
+| `thinking` | `enabled` / `disabled`，控制 DeepSeek / 智谱风格 thinking 参数 |
+| `stream_usage` | 默认 true；不接受 `stream_options` 的网关可关闭，关闭后可能没有流式用量 |
+| `extra_body` | 供应商扩展字段；不能覆盖模型、消息、流式开关或输出上限 |
+| `timeout` / `max_retries` | SDK 超时与重试，默认 180 秒 / 2 次 |
+| `vision` | 是否支持题面图片输入 |
+| `pricing` | 每百万 token 的 input / output / cache_hit 价格，支持峰谷价 |
 
-> 注: 限额为软上限——最后一次 AI 调用在检查通过后执行，可能超额（超额幅度=单次调用费用）。
+DeepSeek / 智谱官方端点保留旧配置的 thinking 默认行为。代理端点应显式声明能力。
+参数和流式用量处理参考 [Chat Completions 接口文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。本项目使用 Chat Completions 兼容协议，非兼容服务需要额外适配。
 
----
-
-## 难度判断开关
-
-默认会先让 AI 评估题目难度（8 级），再据此决定从哪一层模型开始解题。这一步可以整体关掉：
-
-```json
-{
-  "difficulty_detect_enable": false,
-  "difficulty_skip_model": "deepseek-v4-pro"
-}
-```
-
-- **`difficulty_detect_enable: false`** — 跳过难度评估这次 AI 调用（少一次请求、少一份费用），题解里也不会再插入难度标签
-- **`difficulty_skip_model`** — 关闭难度判断时用哪个模型：
-  - 留空 → 沿用 `model_router` 的首个层级（默认 flash），失败后照常升级
-  - 填 `model_router` 分层里的模型（如 pro/max 层的模型）→ 从该层开始，失败后继续向上升级
-  - 填分层之外的模型 → 本次**只使用该模型**，不再走 flash→pro→max 分层
-- 命令行可临时切换（不修改配置文件）：
-
-```bash
-python oj_solver.py 1178 --no-difficulty-detect
-python oj_solver.py 1178 --difficulty-skip-model deepseek-v4-pro
-```
-
-> 比赛守护进程/私信触发的子进程同样会读取 `config.json` 中的这两项，也可用环境变量
-> `OJ_DIFFICULTY_DETECT=0` / `OJ_DIFFICULTY_SKIP_MODEL=...` 覆盖。
-
----
-
-## 守护进程指令
-
-守护进程支持控制台和 OJ 私信两种交互方式：
-
-### 求解
-```
-1316             — 按题号求解 (system 域)
-p/1316           — 同上
-完整URL          — 按链接求解题目/比赛/训练
-```
-
-### 查询
-```
-stats / 统计      — 汇总统计 (AC数/Token/费用)
-today / 今日      — 今日统计
-recent / 最近     — 最近记录
-pending / 进行中  — 正在求解
-list             — 已处理比赛
-```
-
-### 控制
-```
-help             — 帮助
-exit / quit / q  — 退出 (仅控制台)
-```
-
-### 管理 (超级用户)
-```
-whitelist add/remove/list <UID>
-pushlist add/remove/list <UID>
-push <消息>
-td <链接>          — 补充测试数据
-bm               — 全扫标程题解
-bm <链接>         — 指定范围标程题解
-```
-
----
-
-## 模块架构
-
-```
-ojai/
-  oj_solver.py          — 单题求解 (OJClient + SolverOrchestrator)
-  ai_client.py          — 统一 AI 客户端、流式响应、费用统计
-  ai_protocol.py        — 供应商参数与 usage 归一化
-  ai_context.py         — 保留完整题面/当前代码的修复上下文
-  prompt_defaults.py    — 内置提示词兜底
-  config_io.py          — 配置迁移、原子保存、校验、脱敏
-  config_cli.py         — 初始化与离线诊断
-  contest_solver.py     — 比赛/训练批量求解 (多线程)
-  contest_daemon.py     — 守护进程 (监控 + 交互 + 私信)
-  benchmark_solver.py   — 标程题解自动生成
-  testdata_supplement.py — 测试数据补充
-  model_router.py       — 8级难度评估 + 模型路由
-  config_manager.py     — 配置管理 (热重载 + 补齐)
-  dashboard.py          — 活动追踪 + 统计
-  msg_backend.py        — OJ 私信后端
-  webui.py              — Flask Web 界面
-  onebot_server.py      — OneBot 协议适配
-  oj_common.py          — 共享工具 (登录/会话/推送/日志)
-```
-
----
-
-## 求解流程
-
-```
-Phase 0: 免费模型快速尝试 (glm-4.6v-flash)
-  ├─ 生成 → 提交 → 评测
-  ├─ AC? → 完成
-  └─ 429? → 自动切换 flash→pro→max
-
-Phase 1: 难度判断 + 标签筛选   ← 可用 difficulty_detect_enable: false 跳过
-  ├─ 8级难度评估
-  └─ 100+标签库筛选候选 (≤10)
-     跳过时: 直接用 difficulty_skip_model（未配置则用分层首个模型），不插入难度标签
-
-Phase 2: 三层循环
-  外层 (模型升级): flash → pro → max（指定了分层外的模型时只用该模型）
-  中层 (换思路): generate ×2
-  内层 (修正): submit → fix ×2
-
-发布: 难度标签 + 标签 + 解题思路 + 代码 + 页脚(模型/Token/费用)
-```
-
----
-
-## 求解流程：多候选思路 + 反馈闭环
-
-默认开启。**解题与写题解是两个独立阶段**，各自有独立的流程与校验。
-
-### 解题阶段
-
-```
-每条层级下尝试 N 条互相独立的思路：
-
-  思路① 出方案 → 写代码 → 本地编译 → 跑样例 → 随机对拍 → 提交评测
-                                  ↑             ↑          ↓
-                          编译报错/样例 diff    对拍反例    评测反馈
-                                  └──── 带着反馈重写（R 次）────┘
-  思路② 换一个算法角度（不是改上一版代码）→ 同上
-  思路③ …
-
-  全部结束后：AC 优先，其次取得分最高的那一版用于写题解
-```
-
-| 环节 | 作用 |
-|------|------|
-| 多候选思路 | `solve_candidates` 条**独立**思路；第 2 条起明确要求换算法（不同数据结构 / 不同转化 / 正难则反），避免在错误思路上打补丁 |
-| 方案先行 | 先分析问题、定算法、列边界清单，再写代码（`agent_plan` / `agent_alternative_plan`） |
-| 本地编译 | 编译错误立刻可见，并能把编译器原文回喂（而不是等评测返回一句 CE） |
-| 样例校验 | 回喂**精确 diff**（输入 / 期望 / 实际），定位比 OJ 的「WA」快得多 |
-| 随机对拍 | 额外要一份暴力解 + 数据生成器，本地对拍抓出边界错误（self-hack） |
-| 评测反馈闭环 | 提交后的得分与用例分布继续回喂，作为该思路的修正依据 |
-| 结构化记忆 | 每轮失败写入 journal，后续思路与修正都能看到「试过什么、错在哪」 |
-| 预算控制 | 思路数 / 轮次 / 提交次数 / 总时长 / 费用多重上限，只用于防止失控 |
-
-### 题解产出阶段（AC 之后）
-
-不再直接发布求解时的原始输出，而是按固定结构重写一篇题解：
-
-```
-AC 代码 + 题目 + 评测数据 + 求解时的踩坑记录
-   → 题意 / 思路 / 正确性说明 / 复杂度分析 / 实现要点与易错点 / 代码
-   → 发布前校验（代码块必须与 AC 代码逐字一致、公式配对、结构完整、无对话痕迹）
-   → 未通过则定向修复（只改被指出的问题，最多 editorial_fix_rounds 轮）
-```
-
-- **代码一致性是确定性保证**：正文里的代码块会被强制同步成真正 AC 的代码，不依赖模型自觉
-- **易错点来自真实经历**：求解过程中踩过的坑（编译错误 / 样例 WA / 对拍反例）会作为素材写进「实现要点与易错点」
-- **可以指定更强的模型写题解**：`editorial_model`（留空则沿用求解模型）
-
-### 配置
+### 分任务输出预算
 
 ```json
 {
-  "agent_enabled": true,
-  "solve_candidates": 3,
-  "solve_repairs": 2,
-  "agent_max_steps": 12,
-  "agent_max_submissions": 8,
-  "agent_max_seconds": 900,
-  "agent_stress_enable": true,
-  "agent_stress_rounds": 30,
-  "agent_run_timeout": 10,
-  "editorial_enable": true,
-  "editorial_model": "",
-  "editorial_fix_rounds": 2
+  "ai_task_tokens": {
+    "default": 16384,
+    "solve": 16384,
+    "plan": 4096,
+    "reference": 8192,
+    "difficulty": 1024,
+    "editorial": 8192
+  },
+  "compact_history": true
 }
 ```
 
-命令行：`--no-agent`（关闭本地验证，回到原三层循环）、`--agent-steps N`、
-`--no-stress`（只做编译+样例）。环境变量：`OJ_AGENT_ENABLE` / `OJ_AGENT_MAX_STEPS` /
-`OJ_AGENT_STRESS` / `OJ_SOLVE_CANDIDATES` / `OJ_SOLVE_REPAIRS` / `OJ_EDITORIAL_ENABLE` /
-`OJ_EDITORIAL_MODEL`。
+实际请求取任务预算与模型 `max_tokens` 的较小值。预算包含接口计入输出的推理 token；复杂题可提高 `solve` 和 `plan`。
+被截断的输出不会作为完整代码提交。降低上限不保证按比例减少实际费用，实际消耗取决于题目、模型和重试次数。
 
-依赖与降级：C++ 需要本机有 `g++`/`clang++`（Python 题用 `python3`）。**检测不到工具链时会
-自动回退到原来的三层循环**，题解产出流程不受影响（仍会重写题解）。
+其他节省方式：首轮 AC 后跳过难度请求；修正仅保留完整题面、当前代码、最近失败摘要和最新反馈；题解模型只写讲解，AC 代码由程序插入。
+`compact_history: false` 可恢复完整修复历史。流式计量支持最后一个无 choices 的 usage 包；缓存命中 token 不再重复按普通输入价计费。
 
-> ⚠️ 安全提示：本地验证会执行 AI 生成的代码。已限制单次运行超时、输出大小，
-> POSIX 下还会限制地址空间/CPU 时间并在超时后杀进程组，但这**不是真正的沙箱**。
-> 请把机器人跑在可丢弃的环境里，不要给它过高权限。
+### 多模型与难度路由
 
----
+`model_router.tiers` 定义 `flash` / `pro` / `max` 对应模型，名字须与模型表一致。
+难度 1–2 从 flash 开始，3–5 从 pro 开始，6–8 从 max 开始；失败后逐级尝试。
+配置 `difficulty_detect_enable: false` 可省去难度请求；`difficulty_skip_model` 可指定直接使用的模型。
+若它不在路由表中，本次只使用该模型。
 
-## 难度系统
+`ai_vision_model` 指定题面含图时的模型。实际可用模型、输出限制和价格由服务商决定，示例中的名称和价格不是实时查询结果。
 
-| Lv | 标签 | 颜色 | 模型 |
-|----|------|------|------|
-| 1 | 入门 | `#FE4C61` | flash |
-| 2 | 普及− | `#F39C11` | flash |
-| 3 | 普及/提高− | `#FFC116` | pro |
-| 4 | 普及+/提高 | `#52C41A` | pro |
-| 5 | 提高 | `#13C2C2` | pro |
-| 6 | 提高+/省选− | `#3498DB` | max |
-| 7 | 省选/NOI− | `#9D3DCF` | max |
-| 8 | NOI/NOI+/CTSC | `#0E1D69` | max |
+## 求解、验证与题解
 
----
+默认 Agent 流程：方案分析 → 完整代码 → 本地编译 → 样例验证 → 随机对拍 → OJ 评测。
+失败后使用编译日志、样例差异、反例或评测信息修正；仍未通过则换思路或模型。
 
-## 日志系统
+| 配置 | 默认 | 含义 |
+| --- | ---: | --- |
+| `agent_enabled` | true | 本地验证流程开关 |
+| `solve_candidates` | 3 | 每个模型层级的候选思路数量 |
+| `solve_repairs` | 2 | 每条思路最多修正次数 |
+| `agent_max_steps` | 12 | 单次尝试的实现 / 修正轮数上限 |
+| `agent_max_submissions` | 8 | 单次尝试提交上限 |
+| `agent_max_seconds` | 900 | 单次尝试时间上限 |
+| `agent_stress_enable` / `agent_stress_rounds` | true / 30 | 随机对拍开关与轮数 |
+| `editorial_enable` / `editorial_fix_rounds` | true / 2 | AC 后写题解及修复轮数 |
+| `editorial_model` | 空 | 留空沿用求解模型，也可单独指定 |
 
-- 控制台: INFO 级别，简洁格式
-- 文件: DEBUG 级别 (全量)，`logs/oj_YYYYMMDD.log`
-- 自动轮转: 10MB × 5 份
-- 启动时自动检查配置完整性
+题解包含题意、思路、正确性、复杂度、实现要点与代码；程序保证代码块与评测通过的代码一致。
+本地验证会执行 AI 生成的程序。超时、资源限制和 Docker 非 root 运行不能替代专用的代码沙箱，应在专用环境运行。
 
----
-
-## 测试
+## 常用命令
 
 ```bash
-python -m pytest -q                 # 全部离线测试（不需要 AI/OJ 凭据）
-python -m pytest test_core.py -q    # 仅核心逻辑
-python -m pytest test_optimizations.py -q   # 仅优化项回归
-python -m pytest test_agent.py -q   # 仅 agent 求解层（缺 g++ 时自动跳过编译相关用例）
-python -m pytest test_editorial.py -q       # 仅题解产出管线
-```
+# 单题：默认提交并在 AC 后发布题解
+python oj_solver.py 1000
+python oj_solver.py https://your-oj.example/d/custom/p/1000 --stream
+python oj_solver.py 1000 --no-post
+python oj_solver.py 1000 --no-submit
+python oj_solver.py 1000 --no-agent
+python oj_solver.py 1000 --no-stress
+python oj_solver.py 1000 --no-difficulty-detect
+python oj_solver.py 1000 --difficulty-skip-model YOUR_MODEL
 
----
+# 比赛或训练；手动任务可显式忽略长期累计费用
+python contest_solver.py https://your-oj.example/contest/CONTEST_ID --workers 2
+python contest_solver.py https://your-oj.example/training/TRAINING_ID --no-accum
 
-## 环境变量
+# 定时监控 / 仅检查一次
+python contest_daemon.py --interval 120 --domain system --start-page 2
+python contest_daemon.py --once --ended-only --no-interactive
 
-| 变量 | 说明 |
-|------|------|
-| `OJ_ROOT` | OJ 根地址 |
-| `OJ_USERNAME` / `OJ_PASSWORD` | OJ 登录凭据 |
-| `AI_API_KEY` | 全局默认 API Key |
-| `AI_MODEL` | 默认模型名 |
-| `DEEPSEEK_API_KEY` | DeepSeek 系列 API Key |
-| `ZHIPU_API_KEY` | 智谱系列 API Key |
-| `OJ_TD_MODEL` | 测试数据补充模型 |
-| `OJ_BENCHMARK_MODEL` | 标程题解模型 |
-| `OJ_DELAY_MODE` | 延迟模式开关 (≥20题自动) |
-| `OJ_DIFFICULTY_DETECT` | 是否判断题目难度 (1/0，默认 1) |
-| `OJ_DIFFICULTY_SKIP_MODEL` | 关闭难度判断时使用的模型 |
+# 标程扫描 / 指定记录 / 补测试数据
+python benchmark_solver.py --start-page 2
+python benchmark_solver.py https://your-oj.example/record/RECORD_ID
+python testdata_supplement.py https://your-oj.example/p/1000
 
-
-## AI 接口层（重构）
-
-`ai_client.py` 统一生成、修正、流式与普通对话；`ai_protocol.py` 负责协议参数与用量归一化。
-原来的 `from oj_solver import AIClient` 仍兼容。流式调用读取最后一个无 choices 的 usage 包；
-缓存命中仅按缓存价计费，不再同时按普通输入价重复计算。达到输出上限的残缺代码不会作为成功结果提交。
-
-模型配置支持以下可选项（均位于 `models.<模型名>`）：
-
-- `provider`: `auto` / `openai` / `deepseek` / `zhipu` / `compatible`。代理地址建议显式设置；
-  自动识别仅匹配官方主机名，未知兼容端点不附带专有推理参数。
-- `token_parameter`: `max_tokens` 或 `max_completion_tokens`，默认随 provider 选择。
-- `supports_reasoning_effort`: 是否传推理强度。OpenAI 与代理模型需按实际能力显式设为 `true`；其他情况下不猜测模型能力。DeepSeek 保留旧配置的默认行为。
-- `thinking`: `enabled` / `disabled`，控制 DeepSeek / 智谱风格的 thinking 字段。
-- `stream_usage`: 默认 `true`；不接受 `stream_options` 的网关可设为 `false`，此时可能无法统计流式费用。
-- `extra_body`: 网关扩展字段；不得覆盖模型、消息、流式开关或 token 上限。
-- `timeout` / `max_retries`: 默认 180 秒 / 2 次，交由 SDK 处理可重试错误。
-
-请求参数与流式用量处理依据 [Chat Completions 官方接口文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。
-模型能力、价格与输出限制需按实际服务配置；示例配置中的价格不是实时价格查询。
-
-
-## 输出预算与配置诊断
-
-新增 `ai_task_tokens`，默认输出上限如下，实际请求取任务预算与模型 `max_tokens` 的较小值：
-
-| 任务 | 默认上限 |
-| --- | ---: |
-| 通用 / 求解 | 16384 |
-| 方案分析 | 4096 |
-| 对拍素材 | 8192 |
-| 难度评估 | 1024 |
-| 题解写作与修复 | 8192 |
-
-预算包含接口计入输出的推理 token；复杂题需要时请提高对应预算。减少输出上限不等于保证减少
-实际消费，节省比例取决于题目、模型和重试次数。首轮已经 AC 后会跳过难度请求；修复历史默认
-仅保留完整题面、当前代码、最近失败摘要和最新反馈，可用 `compact_history: false` 恢复完整历史。
-题解模型只输出讲解，AC 代码由程序插入，修复题解时也只发送一份完整代码。
-难度评估、题解生成/修复与混淆的费用现在都会纳入单题统计。
-
-```bash
+# Web 管理与离线诊断
+python webui.py --port 5000
 python config_cli.py doctor --json
-python config_cli.py --config path/to/config.json doctor
 ```
 
-诊断只检查本地配置、环境变量引用与请求参数，不发付费请求，不代表服务端连接成功。
-配置优先级仍为：命令行 / 运行时覆盖 > 环境变量 > JSON > 默认值。覆盖在热重载后保留；
-JSON 解析失败时保留上一次有效配置。密钥推荐 `env:MY_KEY` 或 `${MY_KEY}` 引用，
-显式引用缺失时会报缺失，不会把另一个服务的全局密钥发过去。配置文件保存保留扩展字段。
+`--no-submit` 仍可能调用 AI；`--dry-run` 才是仅抓取题面。更多选项可运行对应脚本的 `--help`。
 
-WebUI 的配置页使用与求解器一致的扁平结构，兼容读取旧的 `oj` / `ai` / `code` / `monitor`
-分组结构。保存前验证数值和模型参数，GET 不返回密码或模型密钥原文。使用 `--auth-token`
-时，先在配置页的「访问设置」输入令牌，再刷新。全局字段与模型独立字段的优先级不变；
-模型表仍可直接编辑 JSON，页面提供全局设置与各任务预算。
+守护进程的控制台 / OJ 私信支持：
 
-GitHub Actions 会在 Windows / Linux、Python 3.10 / 3.12 上运行离线回归测试。
+| 指令 | 作用 |
+| --- | --- |
+| `1000`、`p/1000`、题目 / 比赛 / 训练 URL | 触发求解 |
+| `stats` / `统计`、`today` / `今日`、`recent` / `最近` | 查询统计与记录 |
+| `pending` / `进行中`、`list` | 查询任务和已处理比赛 |
+| `whitelist add/remove/list <UID>` | 管理白名单（超级用户） |
+| `pushlist add/remove/list <UID>`、`push 消息` | 推送管理（超级用户） |
+| `td 链接`、`bm`、`bm 链接` | 数据补充、标程扫描（超级用户） |
+| `help`、`exit` / `quit` | 帮助；退出仅限控制台 |
+
+配置 `msg_whitelist`、`msg_superuser`、`msg_push_list` 与 `msg_push_events` 控制权限和推送。初始化模板不自动授予任何用户管理权限。
+
+## 费用、日志与常见问题
+
+- `max_cost_per_problem` 默认 5，自动批量任务可用 `cost_accum_enable` 开启长期累计，记录在 `cost_accum.json`。手动单题默认忽略累计；手动批量可用 `--no-accum`。上限是调用前检查的软上限，最后一次请求可能超额。
+- 难度判断、求解、题解修复和混淆费用纳入统计。费用来自模型配置的价格；未设置价格或供应商未返回 usage 时，费用不能作为真实账单依据。
+- 控制台输出简要日志，`logs/` 保存详细日志；`dashboard.json` 保存统计，`processed_contests.json` 保存比赛处理状态。
+
+| 现象 | 检查方式 |
+| --- | --- |
+| 没有扫描到比赛 | 默认起始页为 2；先试 `--start-page 1`，再检查域名、登录权限及处理记录 |
+| API Key 缺失 | 运行 doctor；检查模型引用的环境变量，不会自动改用其他服务的密钥 |
+| 修改 Web 配置不生效 | 环境变量优先于 JSON，模型独立配置优先于全局字段；容器环境变量修改后需重新创建 |
+| Web 配置返回 403 | 在访问设置填写与 `.env` 相同的 `WEBUI_AUTH_TOKEN` |
+| 回复达到长度上限 | 调高对应任务预算和模型上限，检查推理 token 是否占用输出额度 |
+| 不支持某个请求参数 | 调整 provider、token_parameter、supports_reasoning_effort、thinking 或 stream_usage |
+| 缺少本地工具链 | 本地安装 g++ / clang++，或使用内置 g++ 的 Docker 镜像 |
+| Docker /data 权限错误 | 默认命名卷可自动初始化；自定义 bind mount 需要允许 UID/GID 10001 写入 |
+| init 提示配置已存在 | 继续使用原文件，通过 Web / JSON 修改，或用 `--config` 选择新路径 |
+
+## 开发与测试
+
+```bash
+python -m pytest -q
+python -m pytest test_ai_client.py test_configuration.py test_token_budgets.py test_deployment.py -q
+```
+
+测试使用模拟 AI/OJ，不需要真实凭据；缺少编译器时相关本地编译测试自动跳过。
+GitHub Actions 覆盖 Windows / Linux、Python 3.10 / 3.12，并实际构建 Docker 镜像，验证编译器、配置持久化与 Web 启动。
+
+| 模块 | 职责 |
+| --- | --- |
+| `ai_client.py` / `ai_protocol.py` | AI 请求、流式处理、供应商参数和计费 |
+| `ai_context.py` / `prompt_defaults.py` / `prompts.json` | 修复上下文与提示词 |
+| `config_manager.py` / `config_io.py` / `config_cli.py` | 配置合并、热重载、验证、脱敏、初始化 |
+| `contest_catalog.py` | 守护进程和标程扫描共用的比赛分页 |
+| `runtime_paths.py` / `docker_entrypoint.py` | 运行数据路径与容器命令 |
+| `oj_solver.py` / `solver_agent.py` / `local_judge.py` | 求解编排、候选方案和本地评测 |
+| `editorial.py` / `oj_samples.py` | 题解校验与样例提取 |
+| `oj_common.py` / `dashboard.py` / `msg_backend.py` | OJ 会话、统计和消息 |
+
+旧的 `from oj_solver import AIClient` 继续兼容。许可证见 [LICENSE](LICENSE)。

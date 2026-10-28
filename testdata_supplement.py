@@ -21,7 +21,6 @@ from oj_common import (load_dotenv, create_session, smart_login,
 
 log = logging.getLogger("testdata_supplement")
 
-DEFAULT_MODEL = os.environ.get("OJ_TD_MODEL", "deepseek-v4-pro")
 
 
 # ═══════════════════════════════════════════════
@@ -31,10 +30,12 @@ class TestDataSupplement:
     def __init__(self, url: str, model: str = None,
                  root: str = None, username: str = None, password: str = None):
         load_dotenv()
-        self.root = root or os.environ.get("OJ_ROOT", "https://oj.yuanyicode.com")
-        self.username = username or os.environ.get("OJ_USERNAME", "")
-        self.password = password or os.environ.get("OJ_PASSWORD", "")
-        self.model = model or DEFAULT_MODEL
+        from config_manager import ConfigManager
+        cfg = ConfigManager()
+        self.root = root or cfg.oj_root
+        self.username = username or cfg.username
+        self.password = password or cfg.password
+        self.model = model or os.environ.get("OJ_TD_MODEL") or cfg.ai_model
         self.url = url
         self.session = create_session(verify_ssl=False)
         self._parsed = None
@@ -522,7 +523,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="测试数据补充工具")
     parser.add_argument("url", help="题目链接")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="AI 模型 (默认: deepseek-v4-pro)")
+    parser.add_argument("--model", default=None, help="AI 模型（默认 OJ_TD_MODEL 或配置的 ai_model）")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()

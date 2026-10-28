@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+from runtime_paths import data_file
 
 from config_io import atomic_write_json, read_config, validate_document
 from config_manager import ConfigManager
@@ -23,7 +24,7 @@ def initialize(path, *, model, base_url, oj_root, provider='compatible', profile
         'model_router': {'tiers': {'flash': model}},
         'ai_task_tokens': {'default': 16384, 'solve': 16384, 'plan': 4096,
                            'reference': 8192, 'difficulty': 1024, 'editorial': 8192},
-        'compact_history': True, 'difficulty_detect_enable': profile != 'economy',
+        'contest_start_page': 2, 'compact_history': True, 'difficulty_detect_enable': profile != 'economy',
         'solve_candidates': 2 if profile == 'economy' else 3,
         'agent_stress_enable': True, 'editorial_enable': True,
         'show_thinking': False, 'ai_vision_model': '',
@@ -74,7 +75,7 @@ def diagnose(path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default='config.json', help='配置文件路径')
+    parser.add_argument('--config', default=str(data_file('config.json')), help='配置文件路径')
     commands = parser.add_subparsers(dest='command', required=True)
     init = commands.add_parser('init', help='创建最小可用配置与空白 .env，不覆盖已有文件')
     init.add_argument('--model', required=True)

@@ -4,6 +4,7 @@ OneBot 通信服务端 — HTTP 双向通信。
 接收 OneBot 消息事件 → 解析指令 → 调用 OJ Solver → 回复结果。
 """
 
+from runtime_paths import data_dir
 import os, re, sys, json, time, logging, argparse, subprocess, threading
 from pathlib import Path
 from flask import Flask, request, jsonify
@@ -98,7 +99,7 @@ def cmd_solve(data: dict, args: str):
         try:
             r = subprocess.run([sys.executable, sp, url, "--no-show-thinking"],
                              capture_output=True, text=True, encoding="utf-8",
-                             errors="replace", timeout=300, cwd=str(SCRIPT_DIR))
+                             errors="replace", timeout=300, cwd=str(data_dir(SCRIPT_DIR)))
             out = r.stdout[-1000:] if len(r.stdout) > 1000 else r.stdout
             summary = "\n".join(line for line in out.split("\n")
                 if any(k in line for k in ["AC", "得分", "完成", "题解", "评测", "结果", "异常", "失败"]))[-500:]
@@ -117,7 +118,7 @@ def cmd_contest(data: dict, args: str):
     if not args.startswith("http"): send_reply(data, "格式: contest <链接>"); return
     global TASK_COUNTER; TASK_COUNTER += 1
     send_reply(data, f"比赛任务 #{TASK_COUNTER} 已启动")
-    subprocess.Popen([sys.executable, str(SCRIPT_DIR / "contest_solver.py"), args], cwd=str(SCRIPT_DIR))
+    subprocess.Popen([sys.executable, str(SCRIPT_DIR / "contest_solver.py"), args], cwd=str(data_dir(SCRIPT_DIR)))
 
 
 @app.route("/admin/whitelist", methods=["GET", "POST"])

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """比赛批量解题 — 多线程并行求解，支持多比赛同时处理。"""
 
+from runtime_paths import data_file
 import os, re, sys, json, time, logging, argparse, threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -160,7 +161,7 @@ def main():
     _push_session = s  # 复用主 session 推送
 
     # Cookie jar
-    jar = str(Path(__file__).parent / ".oj_cookies_batch.json")
+    jar = str(data_file(".oj_cookies_batch.json", Path(__file__).parent))
     with open(jar, "w", encoding="utf-8") as f:
         json.dump([{"name": c.name, "value": c.value, "domain": c.domain} for c in s.cookies], f)
 

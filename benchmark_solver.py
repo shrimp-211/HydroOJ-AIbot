@@ -7,6 +7,7 @@
 import os, re, sys, json, time, logging, argparse, tempfile, shutil, threading
 from pathlib import Path
 from datetime import datetime
+from contest_catalog import list_contests, positive_int
 
 sys.path.insert(0, str(Path(__file__).parent))
 from oj_common import (load_dotenv, create_session, smart_login,
@@ -14,7 +15,6 @@ from oj_common import (load_dotenv, create_session, smart_login,
 
 log = logging.getLogger("benchmark_solver")
 
-DEFAULT_MODEL = os.environ.get("OJ_BENCHMARK_MODEL", "deepseek-v4-pro")
 
 
 class BenchmarkSolver:
@@ -22,16 +22,16 @@ class BenchmarkSolver:
 
     def __init__(self, model: str = None):
         load_dotenv()
-        self.root = os.environ.get("OJ_ROOT", "https://oj.yuanyicode.com")
-        self.username = os.environ.get("OJ_USERNAME", "")
-        self.password = os.environ.get("OJ_PASSWORD", "")
-        self.model = model or DEFAULT_MODEL
         self.session = create_session(verify_ssl=False)
         self._oj_sem = threading.Semaphore(4)  # OJ 请求限流
         self._ai = None  # AIClient 延迟初始化（复用费用统计/429处理/客户端缓存）
         from config_manager import ConfigManager
         cfg = ConfigManager()
         self._cfg = cfg
+        self.root = cfg.oj_root
+        self.username = cfg.username
+        self.password = cfg.password
+        self.model = model or os.environ.get("OJ_BENCHMARK_MODEL") or cfg.ai_model
         self.benchmark_users = set(str(x) for x in cfg.get("benchmark_users", [2]))
         self.processed = self._load_processed()
 
@@ -408,7 +408,7 @@ class BenchmarkSolver:
         return self.process_record(rec, force=True)
 
     # ── 扫描全部比赛 ──
-    def scan_all_contests(self, domains: list[str] = None):
+    def scan_all_contests(self, domains: list[str] = None, *, start_page: int | None = None):
         """扫描所有比赛的标程用户满分题（多线程并发处理）"""
         if domains is None:
             domains = self._cfg.monitor_domains or ["system"]
@@ -419,13 +419,9 @@ class BenchmarkSolver:
         for domain in domains:
             log.info("[*] 扫描 domain=%s ...", domain)
             try:
-                r = self.session.get(
-                    f"{self.root}/d/{domain}/contest",
-                    headers={"Accept": "application/json"}, timeout=15,
-                    params={"page": 1, "limit": 50})
-                if r.status_code != 200:
-                    continue
-                for tdoc in r.json().get("tdocs", []):
+                contests = list_contests(self.session, self.root, domain,
+                                         start_page=start_page or self._cfg.contest_start_page)
+                for tdoc in contests:
                     cid = tdoc["_id"]
                     log.info("  比赛: %s (%s)", tdoc.get("title", cid[:12])[:30], cid[:12])
                     records = self.scan_benchmark_ac(domain, cid)
@@ -469,7 +465,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="标程用户题解自动生成")
     parser.add_argument("target", nargs="?", help="提交记录链接 或 比赛链接（无参数则扫描全部比赛）")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="AI 模型")
+    parser.add_argument("--model", default=None, help="AI 模型（默认 OJ_BENCHMARK_MODEL 或配置的 ai_model）")
+    parser.add_argument("--start-page", type=positive_int, default=None,
+                        help="扫描比赛列表的起始页（默认配置值或2）")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -502,7 +500,7 @@ def main():
             else:
                 ok = False
     else:
-        ok = bs.scan_all_contests() > 0
+        ok = bs.scan_all_contests(start_page=args.start_page) > 0
 
     sys.exit(0 if ok else 1)
 

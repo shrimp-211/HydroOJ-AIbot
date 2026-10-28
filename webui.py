@@ -8,8 +8,8 @@ OJ Solver Web GUI — 网页操作界面
 import os
 import sys
 import json
-from dataclasses import asdict
 from config_manager import ConfigManager, FIELD_TO_JSON
+from runtime_paths import data_dir, data_file
 from config_io import (read_config, atomic_write_json, normalize_config,
                        merge_config, redact_config, validate_document)
 import queue
@@ -45,7 +45,7 @@ AUTH_TOKEN = ""  # 如果设置，需要在请求头携带 X-Auth-Token
 
 
 def save_config(cfg: dict):
-    atomic_write_json(ROOT / "config.json", cfg)
+    atomic_write_json(data_file("config.json", ROOT), cfg)
 
 
 def broadcast(msg: str):
@@ -64,12 +64,12 @@ def emit(msg: str):
 def run_script(args: list[str]):
     """子进程运行脚本，实时转发输出到 log_queue（支持流式输出）"""
     global active_proc, task_running, history
-    cmd = [sys.executable, "-u", *args]
+    cmd = [sys.executable, "-u", str(ROOT / args[0]), *args[1:]]
     emit(f"执行: {' '.join(shlex.quote(str(a)) for a in cmd)}")
     with _state_lock: task_running = True
     try:
         proc = subprocess.Popen(
-            cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cmd, cwd=str(data_dir(ROOT)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
             start_new_session=True,
         )
@@ -140,7 +140,7 @@ _config_lock = threading.Lock()
 def config_page():
     if not _check_auth():
         return jsonify({"error": "未授权"}), 403
-    path = ROOT / "config.json"
+    path = data_file("config.json", ROOT)
     try:
         with _config_lock:
             if request.method == "POST":
@@ -169,7 +169,7 @@ def config_doctor():
     if not _check_auth():
         return jsonify({"error": "未授权"}), 403
     from config_cli import diagnose
-    return jsonify(diagnose(ROOT / "config.json"))
+    return jsonify(diagnose(data_file("config.json", ROOT)))
 
 
 @app.route("/status")
@@ -309,7 +309,7 @@ def main():
     parser = argparse.ArgumentParser(description="OJ Solver Web GUI")
     parser.add_argument("--port", type=int, default=5000, help="端口 (默认 5000)")
     parser.add_argument("--host", default="127.0.0.1", help="绑定地址")
-    parser.add_argument("--auth-token", default="", help="API 鉴权 Token（可选）")
+    parser.add_argument("--auth-token", default=os.environ.get("WEBUI_AUTH_TOKEN", ""), help="API 鉴权 Token（或 WEBUI_AUTH_TOKEN）")
     parser.add_argument("--debug", action="store_true", help="调试模式")
 
     try:

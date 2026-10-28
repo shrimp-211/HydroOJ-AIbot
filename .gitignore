@@ -21,3 +21,6 @@ tmp2.md
 
 .venv/
 .pytest_cache/
+
+data/
+backups/

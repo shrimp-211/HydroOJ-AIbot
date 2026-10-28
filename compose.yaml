@@ -1,0 +1,46 @@
+x-runtime: &runtime
+  image: hydrooj-aibot:local
+  build: .
+  init: true
+  env_file: .env
+  environment:
+    WEBUI_AUTH_TOKEN: ${WEBUI_AUTH_TOKEN:?Please set WEBUI_AUTH_TOKEN in .env}
+  volumes:
+    - data:/data
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 256
+  stop_grace_period: 30s
+
+services:
+  web:
+    <<: *runtime
+    command: [web, --host, 0.0.0.0, --port, '5000']
+    ports:
+      - '127.0.0.1:${WEBUI_PORT:-5000}:5000'
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/status', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  daemon:
+    <<: *runtime
+    profiles: [worker]
+    command: [daemon, --no-interactive]
+    restart: unless-stopped
+
+  cli:
+    <<: *runtime
+    profiles: [tools]
+    command: [doctor]
+
+volumes:
+  data:
