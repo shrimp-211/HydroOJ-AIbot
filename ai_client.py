@@ -102,6 +102,7 @@ class AIClient:
         self._clients: dict[tuple, object] = {}  # lazy cache by (base_url, api_key)
         self._client_lock = threading.Lock()
         self._show_thinking = config.get("show_thinking", False)
+        self._unknown_price_warned = set()
 
     def _get_client(self, model_name: str = ""):
         """获取或创建 OpenAI 客户端，按 (base_url, api_key) 缓存"""
@@ -281,8 +282,8 @@ class AIClient:
             args = self._build_args(messages, model, effort, max_tokens)
             if os.environ.get("OJ_DELAY_MODE") == "1":
                 _ai_delay()
-            content, reasoning, usage_obj = (self._stream_call(args) if use_stream
-                                             else self._block_call(args))
+            content, reasoning, usage_obj = (self._stream_call(args, model=model) if use_stream
+                                             else self._block_call(args, model=model))
         except Exception as exc:
             # Never log exception bodies: some gateways echo credentials/request content.
             status = getattr(exc, "status_code", None)
@@ -295,20 +296,26 @@ class AIClient:
         if reasoning and self._show_thinking and not use_stream:
             log.info("[AI 思考] %s", reasoning[:3000])
         usage = self._extract_usage(usage_obj)
-        cost = self._calc_cost(usage, model)
+        cost, cost_known = self._calc_cost(usage, model, with_status=True)
+        cost_known = cost_known and bool(usage)
         elapsed = time.monotonic() - t_start
         if not content:
             log.warning("[-] AI 未返回完整正文: %s（已记录用量）", model)
-        log.info("[+] %s 耗时%.1fs | Token %di/%do | 费用¥%.4f",
-                 model, elapsed, usage.get("input", 0), usage.get("output", 0), cost)
-        return {"content": content, "usage": usage, "cost": cost,
+        cost_text = f"¥{cost:.4f}" if cost_known else "未知（定价或用量不完整）"
+        log.info("[+] %s 耗时%.1fs | Token %di/%do | 费用%s",
+                 model, elapsed, usage.get("input", 0), usage.get("output", 0), cost_text)
+        return {"content": content, "usage": usage, "cost": cost, "cost_known": cost_known,
                 "elapsed_s": elapsed, "model": model, "_incomplete": not bool(content)}
 
-    def _calc_cost(self, usage: dict, model: str = "") -> float:
+    def _calc_cost(self, usage: dict, model: str = "", *, with_status=False):
         """根据模型定价计算费用（元），支持多峰值峰谷价"""
         model = model or self.config["ai_model"]
         pricing = self.config.get_model_pricing(model)
-        if not pricing: return 0.0
+        if not pricing:
+            if model not in self._unknown_price_warned:
+                log.warning("[费用] %s 定价未知，费用与预算可能低估；请运行 config_cli.py prices 检查", model)
+                self._unknown_price_warned.add(model)
+            return (0.0, False) if with_status else 0.0
         now = datetime.now().hour
         inp_price = pricing.get("input", 0)
         out_price = pricing.get("output", 0)
@@ -335,7 +342,8 @@ class AIClient:
             cache_price = inp_price
         cost = ((usage.get("input", 0) - cached) * inp_price +
                 usage.get("output", 0) * out_price + cached * cache_price) / 1_000_000
-        return round(cost, 6)
+        cost = round(cost, 6)
+        return (cost, True) if with_status else cost
 
     @staticmethod
     def _extract_code(content: str, ext: str) -> str:
@@ -383,6 +391,7 @@ class AIClient:
         code = self._extract_code(r["content"], self.config.lang_ext)
         return {"solution_md": r["content"], "code": code, "raw": r["content"],
                 "usage": r["usage"], "elapsed_s": r["elapsed_s"], "cost": r["cost"],
+                "cost_known": r.get("cost_known", False),
                 "model": r.get("model", model or self.config["ai_model"])}
 
     # ---- 核心调用 ----
@@ -394,10 +403,11 @@ class AIClient:
              {"role": "user", "content": user_prompt}],
             use_stream, images=images, model=model, effort=effort, task=task)
 
-    def _stream_call(self, args: dict) -> tuple:
-        client = self._get_client(args["model"])
+    def _stream_call(self, args: dict, *, model: str = "") -> tuple:
+        name = model or args["model"]
+        client = self._get_client(name)
         options = {"stream": True}
-        if self.config.get_model_config(args["model"]).get("stream_usage", True):
+        if self.config.get_model_config(name).get("stream_usage", True):
             options["stream_options"] = {"include_usage": True}
         stream = client.chat.completions.create(**args, **options)
         content, reasoning, usage, finish = [], [], None, None
@@ -428,8 +438,8 @@ class AIClient:
             return "", "", usage
         return "".join(content), "".join(reasoning), usage
 
-    def _block_call(self, args: dict) -> tuple:
-        resp = self._get_client(args["model"]).chat.completions.create(**args)
+    def _block_call(self, args: dict, *, model: str = "") -> tuple:
+        resp = self._get_client(model or args["model"]).chat.completions.create(**args)
         if not resp.choices:
             return "", "", resp.usage
         choice = resp.choices[0]

@@ -98,16 +98,25 @@ def validate_document(data: dict) -> list[str]:
         if not attr:
             continue  # Allow extension settings used by other entry points.
         default = defaults[attr]
-        if type(value) is not type(default):
+        if type(value) is not type(default) and not (attr == 'pricing_usd_to_cny' and type(value) is int):
             # Runtime accepts string scalars for legacy configs; the editor writes typed JSON.
             errors.append(f'{key}: 应为 {type(default).__name__}')
     for key in ('oj_root', 'oj_base', 'ai_base_url'):
         if key in data and not _valid_url(data[key]):
             errors.append(f'{key}: 需要 http(s) URL')
-    for key in ('ai_max_tokens', 'verify_timeout', 'monitor_interval', 'contest_start_page', 'agent_max_steps',
+    for key in ('ai_max_tokens', 'verify_timeout', 'monitor_interval', 'contest_start_page', 'pricing_refresh_hours', 'agent_max_steps',
                 'agent_max_submissions', 'agent_max_seconds', 'agent_run_timeout', 'solve_candidates'):
         if key in data and (type(data[key]) is not int or data[key] <= 0):
             errors.append(f'{key}: 必须是正整数')
+    from model_pricing import valid_rate
+    from model_services import normalize_base_url, models_urls
+    if 'pricing_usd_to_cny' in data and not valid_rate(data['pricing_usd_to_cny']):
+        errors.append('pricing_usd_to_cny: 必须是非负有限数值，0 表示未设置')
+    if data.get('ai_base_url'):
+        try:
+            normalize_base_url(data['ai_base_url'])
+        except ValueError as exc:
+            errors.append(str(exc))
     budgets = data.get('ai_task_tokens', {})
     if isinstance(budgets, dict):
         for task, value in budgets.items():
@@ -141,6 +150,28 @@ def validate_document(data: dict) -> list[str]:
                 errors.append(f'{prefix}.thinking: 必须是 enabled 或 disabled')
             if 'api_key' in model and model['api_key'] is not None and not isinstance(model['api_key'], str):
                 errors.append(f'{prefix}.api_key: 必须是字符串或 null')
+            for key in ('model_id', 'models_url', 'pricing_provider', 'pricing_model'):
+                if key in model and not isinstance(model[key], str):
+                    errors.append(f'{prefix}.{key}: 必须是字符串')
+            if isinstance(model.get('models_url', ''), str):
+                try:
+                    models_urls(model.get('base_url') or data.get('ai_base_url') or defaults['ai_base_url'], model.get('models_url', ''))
+                except ValueError as exc:
+                    errors.append(f'{prefix}: {exc}')
+            pricing = model.get('pricing', {})
+            if not isinstance(pricing, dict):
+                errors.append(f'{prefix}.pricing: 必须是对象')
+            else:
+                if pricing.get('currency', 'CNY') != 'CNY':
+                    errors.append(f'{prefix}.pricing: 手工价格必须先换算为 CNY')
+                rates = [pricing] + (pricing.get('peaks', []) if isinstance(pricing.get('peaks', []), list) else [])
+                for rate in rates:
+                    if not isinstance(rate, dict):
+                        errors.append(f'{prefix}.pricing: 峰谷价格必须是对象')
+                        continue
+                    for key in ('input', 'output', 'cache_hit', 'peak_input', 'peak_output', 'peak_cache_hit'):
+                        if key in rate and not valid_rate(rate[key]):
+                            errors.append(f'{prefix}.pricing.{key}: 必须是非负有限数值')
             extra = model.get('extra_body', {})
             if not isinstance(extra, dict) or set(extra) & {'model', 'messages', 'stream', 'max_tokens', 'max_completion_tokens'}:
                 errors.append(f'{prefix}.extra_body: 必须是对象且不能覆盖路由/输出上限')

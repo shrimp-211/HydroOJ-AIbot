@@ -23,3 +23,5 @@ data
 backups
 *.log
 *.tmp
+
+model_prices.json

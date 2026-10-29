@@ -172,6 +172,58 @@ def config_doctor():
     return jsonify(diagnose(data_file("config.json", ROOT)))
 
 
+@app.route('/models/discover', methods=['POST'])
+def models_discover():
+    if not _check_auth():
+        return jsonify({'error': '未授权'}), 403
+    from model_services import discover_models
+    try:
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            raise ValueError('需要 JSON 对象')
+        manager = ConfigManager(str(data_file('config.json', ROOT)))
+        name = body.get('model') or manager.ai_model
+        if not isinstance(name, str) or (name != manager.ai_model and name not in manager.models):
+            raise ValueError('请选择已经保存的模型连接')
+        return jsonify(discover_models(manager.get_model_config(name)))
+    except (ValueError, OSError) as exc:
+        return jsonify({'error': str(exc) if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError) else '配置读取失败'}), 400
+
+
+@app.route('/models/add', methods=['POST'])
+def models_add():
+    if not _check_auth():
+        return jsonify({'error': '未授权'}), 403
+    from config_cli import add_model
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'error': '需要 JSON 对象'}), 400
+    try:
+        allowed = {'name', 'model_id', 'base_url', 'api_key_env', 'provider', 'pricing_provider', 'set_default'}
+        if set(body) - allowed or not {'name', 'model_id', 'base_url'} <= set(body):
+            raise ValueError('缺少必要字段或包含未知字段')
+        if 'set_default' in body and type(body['set_default']) is not bool:
+            raise ValueError('set_default 必须是 bool')
+        with _config_lock:
+            result = add_model(data_file('config.json', ROOT), **body)
+        return jsonify(result)
+    except (ValueError, TypeError, OSError):
+        return jsonify({'error': '新增失败：请检查名称是否重复、URL、供应商和环境变量名'}), 400
+
+
+@app.route('/pricing', methods=['GET'])
+@app.route('/pricing/refresh', methods=['POST'])
+def pricing_status():
+    if not _check_auth():
+        return jsonify({'error': '未授权'}), 403
+    from config_cli import price_report
+    try:
+        manager = ConfigManager(str(data_file('config.json', ROOT)))
+        return jsonify(price_report(manager, refresh=request.method == 'POST'))
+    except (ValueError, TypeError, OSError):
+        return jsonify({'error': '无法检查定价，请先修正配置'}), 400
+
+
 @app.route("/status")
 def status():
     with _state_lock:

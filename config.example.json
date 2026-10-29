@@ -262,5 +262,9 @@
   "compact_history": true,
   "_compact_history": "修正只携带完整题面、当前代码、最近失败摘要和当前反馈，避免重复发送旧代码",
   "contest_start_page": 2,
-  "_contest_start_page": "比赛列表默认从第2页开始获取（含该页）；设为1包含首页。守护进程与标程扫描共用，可用 OJ_CONTEST_START_PAGE 或 --start-page 覆盖"
+  "_contest_start_page": "比赛列表默认从第2页开始获取（含该页）；设为1包含首页。守护进程与标程扫描共用，可用 OJ_CONTEST_START_PAGE 或 --start-page 覆盖",
+  "pricing_auto_update": true,
+  "pricing_refresh_hours": 6,
+  "pricing_usd_to_cny": 0.0,
+  "_pricing_catalog_help": "models.dev 目录为 USD/百万 token；先设置 pricing_usd_to_cny 才换算为 CNY。手工 models.<name>.pricing 优先；代理可指定 pricing_provider 与 pricing_model。"
 }

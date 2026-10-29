@@ -248,12 +248,96 @@ Web 配置页的「监控守护 → 比赛列表起始页」可直接修改 JSON
 支持 `env:NAME`、`${NAME}` 和旧的大写变量名格式。显式引用缺失时不会使用其他服务的全局密钥。
 Web 配置接口不返回密码或模型密钥原文；留空表示保留现有凭据。
 
+### 获取模型列表与新增连接
+
+参考 cc-switch 的模型发现流程，bot 可以查询已保存连接的模型列表，不请求内容生成：
+
+```bash
+python config_cli.py models --json
+python config_cli.py models --model YOUR_CONFIG_NAME
+# Docker
+docker compose run --rm cli config models --json
+```
+
+API 地址支持粘贴完整的 `/chat/completions` 或 `/models` 地址，程序会还原基础地址，保留自定义路径前缀。
+仅在根地址的 `/models` 返回 404/405 时尝试 `/v1/models`。返回的 `base_url` 是查询成功的基础地址。
+鉴权失败不会继续探测其他端点；请求不跟随重定向，密钥不会被转发给另一个站点。
+模型配置可指定同源的 `models_url`；列表支持 `data` / `models` 数组。
+
+新增连接只保存密钥环境变量引用，例如：
+
+```bash
+python config_cli.py add-model fast --model-id YOUR_API_MODEL_ID --base-url https://your-api.example/v1 --api-key-env MY_PROVIDER_KEY --provider compatible
+```
+
+先在 `.env` 设置 `MY_PROVIDER_KEY`；Docker 需要将新增变量注入容器后重新创建服务。
+`fast` 是本地配置别名，`model_id` 是真正发给 API 的模型 ID。重复配置名会被拒绝，原连接不会被覆盖。
+加入 `--set-default` 会将它设为默认，并切换为该模型的单模型路由；需要多模型时继续配置 `model_router.tiers`。
+Web 的「配置 → 接入模型」提供相同流程：选择已有连接获取列表，再填写别名、模型 ID、地址及密钥变量名。
+
+模型列表不保证其中每个模型都支持 Chat Completions。当前仍只支持该兼容协议；Anthropic Messages / Gemini 原生协议、OAuth 订阅接入未包含在此功能中。
+
+### 自动获取价格
+
+价格目录使用 [models.dev](https://models.dev)，参考 [cc-switch 定价与接入研究记录](docs/cc-switch-reference.md) 独立实现。
+源价格单位是 **USD / 百万 token**，项目既有统计与预算单位是 **CNY**，因此必须显式维护换算率：
+
+```json
+{
+  "pricing_auto_update": true,
+  "pricing_refresh_hours": 6,
+  "pricing_usd_to_cny": 0.0
+}
+```
+
+`0.0` 表示未设置汇率；请替换成你采用的 **1 USD 对应 CNY 数额**，这不是实时汇率查询。
+也可设置 `PRICING_USD_TO_CNY` 环境变量。美元金额只乘一次汇率，token 计费再除以一百万。
+
+```bash
+# 从公共目录更新价格缓存，不发送 OJ 凭据或 AI Key
+python config_cli.py prices --refresh
+# 查看本地价格、来源、是否过期以及未匹配原因；不联网
+python config_cli.py prices --json
+# Docker
+docker compose run --rm cli config prices --refresh
+```
+
+CLI 的 `prices --usd-to-cny RATE` 可保存汇率；Web 的「自动定价」可以设置汇率、刷新间隔并查看结果。
+
+- 手工 `models.<name>.pricing` 优先，包括显式免费价格；自动同步不改写这部分配置。
+- 正常运行时按需刷新，默认间隔 6 小时；缓存写入配置文件同目录的 `model_prices.json`，Docker 中位于持久化 `/data`。
+- 网络失败时保留最后有效缓存，并至少等待 60 秒再尝试。无法匹配或缺少汇率时标记价格未知，不把它解释成免费。
+- `doctor` 和价格查看保持离线；`prices --refresh` / Web 刷新按钮才立即访问公共目录。
+- 按供应商和模型 ID 精确匹配。官方主机或目录中唯一匹配的 API 主机可识别供应商；无法识别的代理服务必须显式指定 `pricing_provider`，如 `openai`、`deepseek`、`zhipuai`。`provider` 仅表示协议，不能证明代理的实际收费标准。
+- 通过 `pricing_model` 映射代理别名，不会按模糊名称或不明后缀套用另一模型价格。未指定时使用 `model_id`，再回退到配置名称。
+- 公共分档价格暂不自动套用，需手工填写适用费率。公共报价、手工汇率与网关折扣可能与实际账单不同，未知价格或供应商缺失 usage 时，费用上限不能保证生效。
+
+示例：代理模型使用 OpenAI 目录中的某个价格作为估算：
+
+```json
+{
+  "models": {
+    "fast": {
+      "model_id": "YOUR_PROXY_MODEL_ID",
+      "base_url": "https://your-api.example/v1",
+      "api_key": "env:MY_PROVIDER_KEY",
+      "provider": "compatible",
+      "pricing_provider": "openai",
+      "pricing_model": "EXACT_MODELS_DEV_MODEL_ID"
+    }
+  }
+}
+```
+
 ### 模型协议参数
 
 这些可选字段位于 `models.<模型名>`：
 
 | 字段 | 用途 |
 | --- | --- |
+| `model_id` | 实际 API 模型 ID；配置名称可以使用本地别名 |
+| `models_url` | 可选的同源模型列表地址 |
+| `pricing_provider` / `pricing_model` | 定价目录供应商与精确模型 ID |
 | `provider` | `auto` / `openai` / `deepseek` / `zhipu` / `compatible`；auto 只识别官方主机名 |
 | `token_parameter` | `max_tokens` 或 `max_completion_tokens`；默认按 provider 选择 |
 | `reasoning_effort` | 模型支持的推理强度；留空不传 |
@@ -388,7 +472,7 @@ python config_cli.py doctor --json
 
 ```bash
 python -m pytest -q
-python -m pytest test_ai_client.py test_configuration.py test_token_budgets.py test_deployment.py -q
+python -m pytest test_ai_client.py test_configuration.py test_token_budgets.py test_deployment.py test_model_catalog.py -q
 ```
 
 测试使用模拟 AI/OJ，不需要真实凭据；缺少编译器时相关本地编译测试自动跳过。
@@ -399,6 +483,7 @@ GitHub Actions 覆盖 Windows / Linux、Python 3.10 / 3.12，并实际构建 Doc
 | `ai_client.py` / `ai_protocol.py` | AI 请求、流式处理、供应商参数和计费 |
 | `ai_context.py` / `prompt_defaults.py` / `prompts.json` | 修复上下文与提示词 |
 | `config_manager.py` / `config_io.py` / `config_cli.py` | 配置合并、热重载、验证、脱敏、初始化 |
+| `model_services.py` / `model_pricing.py` | 模型列表发现、地址归一化、价格目录缓存与汇率换算 |
 | `contest_catalog.py` | 守护进程和标程扫描共用的比赛分页 |
 | `runtime_paths.py` / `docker_entrypoint.py` | 运行数据路径与容器命令 |
 | `oj_solver.py` / `solver_agent.py` / `local_judge.py` | 求解编排、候选方案和本地评测 |

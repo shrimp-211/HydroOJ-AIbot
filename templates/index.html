@@ -148,6 +148,30 @@ textarea { font-family: var(--mono); font-size: 12px; }
       </div>
     </div>
     <div class="card">
+      <h2>接入模型</h2>
+      <label>使用已保存的连接查询模型</label><select id="cfg-model-source"></select>
+      <button class="btn btn-outline mt8" onclick="discoverModels()">获取模型列表（不生成内容）</button>
+      <p class="small" id="cfg-model-discovery"></p>
+      <label>配置名称（自定义别名）</label><input id="new-model-name" placeholder="例如 fast-model">
+      <label>API 模型 ID</label><input id="new-model-id" list="remote-model-ids"><datalist id="remote-model-ids"></datalist>
+      <label>API 地址</label><input id="new-model-url" placeholder="https://your-api.example/v1">
+      <label>密钥环境变量名</label><input id="new-model-key-env" value="AI_API_KEY">
+      <p class="small">请先在运行环境中设置该变量；模型配置仅保存引用。</p>
+      <label>接口类型</label><select id="new-model-provider"><option value="compatible">OpenAI 兼容</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="zhipu">智谱</option></select>
+      <label>价格目录供应商 ID（代理服务需指定）</label><input id="new-model-price-provider" placeholder="例如 openai、deepseek、zhipuai">
+      <label><input id="new-model-default" type="checkbox" style="width:auto"> 设为默认，并切换为此模型的单模型路由</label>
+      <button class="btn btn-green mt8" onclick="addModel()">新增模型连接</button>
+    </div>
+    <div class="card">
+      <h2>自动定价</h2>
+      <label>USD → CNY（1 美元对应人民币；0 表示未设置）</label><input id="cfg-price-rate" type="number" min="0" step="0.0001">
+      <label>刷新间隔（小时）</label><input id="cfg-price-hours" type="number" min="1">
+      <label><input id="cfg-price-auto" type="checkbox" style="width:auto"> 运行时自动刷新价格目录</label>
+      <p class="small">手工价格优先。公共美元报价仅作估算；请维护汇率。先保存配置，再刷新目录。</p>
+      <div class="btn-group"><button class="btn btn-outline" onclick="showPrices(false)">查看价格</button><button class="btn btn-outline" onclick="showPrices(true)">刷新公共价格目录</button></div>
+      <pre id="cfg-prices" style="white-space:pre-wrap;font-size:12px"></pre>
+    </div>
+    <div class="card">
       <h2>代码设置</h2>
       <label>提交语言 ID</label><input id="cfg-code-lang" placeholder="cc.cc14o2">
       <p class="small mt8">C++14: cc.cc14o2 | Python3: py.py3 | Java: java</p>
@@ -315,6 +339,14 @@ async function loadConfig() {
     document.getElementById('cfg-editorial-budget').value = c.ai_task_tokens?.editorial ?? 8192;
     document.getElementById('cfg-detect').checked = c.difficulty_detect_enable;
     document.getElementById('cfg-compact').checked = c.compact_history;
+    document.getElementById('cfg-price-rate').value = c.pricing_usd_to_cny ?? 0;
+    document.getElementById('cfg-price-hours').value = c.pricing_refresh_hours ?? 6;
+    document.getElementById('cfg-price-auto').checked = c.pricing_auto_update ?? true;
+    const source = document.getElementById('cfg-model-source');
+    source.replaceChildren();
+    for (const name of new Set([c.ai_model, ...Object.keys(c.models || {}).filter(n => !n.startsWith('_'))])) {
+      const option = document.createElement('option'); option.value = name; option.textContent = name; source.append(option);
+    }
   } catch (error) { showMsg(error.message, false); }
 }
 
@@ -328,7 +360,9 @@ async function saveConfig() {
     contest_start_page:Number(value('contest-page')), monitor_interval:Number(value('mon-interval')), monitor_state_file:value('mon-state'),
     ai_task_tokens:{solve:Number(value('solve-budget')), plan:Number(value('plan-budget')), editorial:Number(value('editorial-budget'))},
     difficulty_detect_enable:document.getElementById('cfg-detect').checked,
-    compact_history:document.getElementById('cfg-compact').checked
+    compact_history:document.getElementById('cfg-compact').checked,
+    pricing_usd_to_cny:Number(value('price-rate')), pricing_refresh_hours:Number(value('price-hours')),
+    pricing_auto_update:document.getElementById('cfg-price-auto').checked
   };
   if (value('ai-key')) payload.ai_api_key = value('ai-key');
   if (document.getElementById('cfg-oj-pass').value) payload.password = document.getElementById('cfg-oj-pass').value;
@@ -350,6 +384,40 @@ async function diagnoseConfig() {
     box.textContent = [result.ok ? '检查通过' : '请修正以下问题', ...result.errors, ...result.warnings,
       ...result.models.map(m => `${m.name}: ${m.provider}，输出上限 ${m.output_limit ?? '?'}`)].join('\n');
   } catch (error) { box.textContent = error.message; }
+}
+
+async function discoverModels() {
+  const box = document.getElementById('cfg-model-discovery');
+  box.textContent = '正在查询已保存连接…';
+  try {
+    const r = await apiFetch('/models/discover', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:document.getElementById('cfg-model-source').value})});
+    const data = await r.json(); if (!r.ok) throw new Error(data.error);
+    const list = document.getElementById('remote-model-ids'); list.replaceChildren();
+    for (const row of data.models) {const option = document.createElement('option'); option.value = row.id; list.append(option);}
+    document.getElementById('new-model-url').value = data.base_url;
+    box.textContent = `找到 ${data.models.length} 个模型。在 API 模型 ID 中选择；可用列表不代表每个模型都支持 Chat Completions。`;
+  } catch (error) {box.textContent = error.message;}
+}
+
+async function addModel() {
+  const value = id => document.getElementById('new-model-'+id).value.trim();
+  try {
+    const r = await apiFetch('/models/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+      name:value('name'), model_id:value('id'), base_url:value('url'), api_key_env:value('key-env'),
+      provider:value('provider'), pricing_provider:value('price-provider'), set_default:document.getElementById('new-model-default').checked})});
+    const data = await r.json(); if (!r.ok) throw new Error(data.error);
+    showMsg('模型连接已保存', true); await loadConfig();
+  } catch (error) {showMsg(error.message, false);}
+}
+
+async function showPrices(refresh) {
+  const box = document.getElementById('cfg-prices'); box.textContent = refresh ? '正在刷新公共价格目录…' : '正在读取缓存…';
+  try {
+    const r = await apiFetch(refresh ? '/pricing/refresh' : '/pricing', {method:refresh ? 'POST' : 'GET'});
+    const data = await r.json(); if (!r.ok) throw new Error(data.error);
+    box.textContent = [`目录：${data.count} 项${data.stale ? '（无缓存或已过期）' : ''}`, data.error || '', ...data.models.map(m =>
+      m.known ? `${m.name}: ¥${m.pricing.input ?? 0} 输入 / ¥${m.pricing.output ?? 0} 输出（百万 token，${m.source === 'manual' ? '手工' : '自动'}）` : `${m.name}: ${m.reason}`)].filter(Boolean).join('\n');
+  } catch (error) {box.textContent = error.message;}
 }
 
 // 首次加载

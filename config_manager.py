@@ -30,6 +30,9 @@ class AppConfig:
         "default": 16384, "solve": 16384, "plan": 4096, "reference": 8192,
         "difficulty": 1024, "editorial": 8192,
     })
+    pricing_auto_update: bool = True
+    pricing_refresh_hours: int = 6
+    pricing_usd_to_cny: float = 0.0  # 0 means unset; never guess an exchange rate.
     compact_history: bool = True
     # 多模态视觉模型（题面含图时优先使用，见 is_vision_model）
     ai_vision_model: str = "deepseek-v4-flash-vision-exp"
@@ -105,6 +108,7 @@ class ConfigManager:
         self._callbacks: list = []
         self._overrides = dict(cli_overrides or {})
         self._load_error = ""
+        self._price_catalog = None
         self.reload()
         if auto_reload:
             self._start_watcher()
@@ -200,6 +204,7 @@ class ConfigManager:
                 "ai_vision_model": ["OJ_AI_VISION_MODEL"],
                 "cookie_jar": ["OJ_COOKIE_JAR"],
                 "contest_start_page": ["OJ_CONTEST_START_PAGE"],
+                "pricing_usd_to_cny": ["PRICING_USD_TO_CNY"],
                 "difficulty_detect_enable": ["OJ_DIFFICULTY_DETECT", "DIFFICULTY_DETECT"],
                 "difficulty_skip_model": ["OJ_DIFFICULTY_SKIP_MODEL", "DIFFICULTY_SKIP_MODEL"],
                 "agent_enabled": ["OJ_AGENT_ENABLE", "AGENT_ENABLE"],
@@ -414,9 +419,12 @@ class ConfigManager:
             )
         if isinstance(md, dict):
             for key in ("provider", "token_parameter", "supports_reasoning_effort",
-                        "thinking", "extra_body", "stream_usage", "timeout", "max_retries"):
+                        "thinking", "extra_body", "stream_usage", "timeout", "max_retries",
+                        "model_id", "models_url", "pricing_provider", "pricing_model"):
                 if key in md and md[key] is not None:
                     result[key] = copy.deepcopy(md[key])
+        from model_services import normalize_base_url
+        result['base_url'] = normalize_base_url(result['base_url'])
         # Resolve environment references each time so credential rotation takes effect.
         return copy.deepcopy(result)
 
@@ -438,8 +446,23 @@ class ConfigManager:
     def get_model_reasoning_effort(self, model_name: str) -> str:
         return self.get_model_config(model_name)["reasoning_effort"]
 
+    def price_catalog(self):
+        from model_pricing import PriceCatalog
+        with self._lock:
+            if self._price_catalog is None:
+                self._price_catalog = PriceCatalog(self._path.with_name('model_prices.json'))
+            return self._price_catalog
+
+    def pricing_info(self, model_name: str, *, refresh=False) -> dict:
+        from model_pricing import resolve_pricing
+        return resolve_pricing(self.price_catalog(), self.get_model_config(model_name), model_name,
+                               usd_to_cny=self.cfg.pricing_usd_to_cny,
+                               refresh=refresh and self.cfg.pricing_auto_update,
+                               ttl=self.cfg.pricing_refresh_hours * 3600)
+
     def get_model_pricing(self, model_name: str) -> dict:
-        return self.get_model_config(model_name)["pricing"]
+        # Network refresh is only needed when the operator has supplied a conversion rate.
+        return self.pricing_info(model_name, refresh=self.cfg.pricing_usd_to_cny > 0)['pricing']
 
     def get_vision_model(self) -> str:
         """多模态视觉模型名。配置 ai_vision_model 或按 models 段中标记 vision 的模型"""
