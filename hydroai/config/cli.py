@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from hydroai import __version__ as APP_VERSION
 from hydroai.config.paths import config_file
 
 from hydroai.config.io import atomic_write_json, read_config, validate_document
@@ -249,6 +250,8 @@ def _print_quota(report):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version', action='version',
+                        version=f'%(prog)s {APP_VERSION}')
     parser.add_argument('--config', default=str(config_file('config.json')), help='配置文件路径')
     commands = parser.add_subparsers(dest='command', required=True)
     init = commands.add_parser('init', help='创建单模型配置，不覆盖已有文件')

@@ -10,6 +10,7 @@ import sys
 import json
 import time
 import secrets
+from hydroai import __version__ as APP_VERSION
 from hydroai.config.manager import ConfigManager, FIELD_TO_JSON
 from hydroai.config.paths import data_dir, data_file, config_file, project_root
 from hydroai.monitor import daemon_control
@@ -143,7 +144,7 @@ PAGE = TEMPLATE_PATH.read_text(encoding="utf-8") if TEMPLATE_PATH.exists() else 
 # ============================================================
 @app.route("/")
 def index():
-    return render_template_string(PAGE)
+    return render_template_string(PAGE, app_version=APP_VERSION)
 
 
 _config_lock = threading.Lock()
@@ -258,7 +259,13 @@ def status():
         "task_running": task,
         "daemon_running": running,
         "daemon_pid": daemon["pid"],
+        "version": APP_VERSION,
     })
+
+
+@app.route("/api/version")
+def api_version():
+    return jsonify({"version": APP_VERSION})
 
 
 # ── 后台任务 / 守护进程 ──

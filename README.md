@@ -1,5 +1,7 @@
 # HydroOJ AIbot
 
+**当前版本：2.1.0**
+
 为 Hydro OJ 提供 AI 解题、比赛监控、标程题解生成与测试数据补充。支持多模型路由、本地编译与对拍、结构化题解、token / 费用统计，以及 Web 配置和统计页面。
 
 ## 功能与运行方式
@@ -59,6 +61,7 @@ source .venv/bin/activate
 
 ```bash
 pip install -r requirements.txt
+python config_cli.py --version
 python config_cli.py init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example --profile economy
 ```
 
@@ -163,6 +166,7 @@ docker compose --env-file config/.env run --rm cli solve --help
 
 ```text
 ghcr.io/shrimp-211/hydrooj-aibot:latest
+ghcr.io/shrimp-211/hydrooj-aibot:v2.1.0
 ghcr.io/shrimp-211/hydrooj-aibot:<commit-sha>
 ghcr.io/shrimp-211/hydrooj-aibot:<tag>      # push v* 标签时
 ```
@@ -389,7 +393,7 @@ python config_cli.py quota --refresh   # 强制刷新远端余额（忽略缓存
 
 Web 面板的「用量与额度」页展示概览卡片、额度进度与重置倒计时、每日趋势、全年热力图、按模型/供应商/任务分布和最近请求。配置页底部提供「高级配置（JSON）」，可编辑包括 `quotas` 在内的全部字段；密钥不会回显，省略 `api_key` 会保留原值，设为 `null` 清除，`*_configured` 标记在保存时自动忽略。私信/控制台可用 `usage` / `用量`、`quota` / `额度`。
 
-Web API 鉴权：`/config`、`/run/*`、`/daemon/*`、`/api/usage/*`、`/api/quota`、`/api/stats`、`/api/today`、`/api/history`、`/history` 均要求 `X-Auth-Token`（未设置 Token 时仅允许本机访问）；`/status` 保持公开供容器健康检查。`/stream` 由前端先申请 60 秒短时票据再连接，避免把长期 Token 放进 URL。
+Web API 鉴权：`/config`、`/run/*`、`/daemon/*`、`/api/usage/*`、`/api/quota`、`/api/stats`、`/api/today`、`/api/history`、`/history` 均要求 `X-Auth-Token`（未设置 Token 时仅允许本机访问）；`/status` 保持公开供容器健康检查，`/api/version` 公开返回版本号。`/stream` 由前端先申请 60 秒短时票据再连接，避免把长期 Token 放进 URL。
 
 ```json
 {
