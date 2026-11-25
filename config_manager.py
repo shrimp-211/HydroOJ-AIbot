@@ -19,12 +19,12 @@ class AppConfig:
     password: str = ""
     # AI (全局默认值，可被 models.<name> 覆盖)
     ai_base_url: str = "https://api.deepseek.com"
-    ai_model: str = "deepseek-v4-pro"
+    ai_model: str = "deepseek-flash"
     ai_api_key: str = ""
     ai_reasoning_effort: str = "high"
     ai_max_tokens: int = 384000
     # 多模态视觉模型（题面含图时优先使用，见 is_vision_model）
-    ai_vision_model: str = "deepseek-v4-flash-vision-exp"
+    ai_vision_model: str = "deepseek-flash"
     max_problem_images: int = 4  # 每道题最多下载几张题面图片
     # Code
     lang: str = "cc.cc14o2"
