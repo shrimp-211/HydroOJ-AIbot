@@ -26,6 +26,10 @@ class AppConfig:
     ai_api_key: str = ""
     ai_reasoning_effort: str = "high"
     ai_max_tokens: int = 384000
+    # 任务开始前探测所有已配置模型；全部不可用时暂停任务并通知。
+    ai_health_check_enable: bool = True
+    ai_health_check_ttl: int = 300          # 健康检查结果缓存秒数；0=每次检查
+    ai_health_check_timeout: int = 15       # 单个模型探测超时秒数
     ai_task_tokens: dict = field(default_factory=lambda: {
         "default": 16384, "solve": 16384, "plan": 4096, "reference": 8192,
         "difficulty": 1024, "editorial": 8192,

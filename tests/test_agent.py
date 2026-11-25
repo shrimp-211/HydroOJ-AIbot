@@ -36,7 +36,7 @@ def _cfg(tmp_path, **over):
     fixture = root / "config" / "config.json"
     if not fixture.exists():
         fixture = root / "config.json"
-    base = {"agent_enabled": True}
+    base = {"agent_enabled": True, "ai_health_check_enable": False}
     base.update(over)
     return Config(config_path=str(fixture if fixture.exists() else tmp_path / "none.json"),
                   cli_overrides=base)

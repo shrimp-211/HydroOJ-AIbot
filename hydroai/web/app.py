@@ -12,6 +12,7 @@ import time
 import secrets
 from hydroai.config.manager import ConfigManager, FIELD_TO_JSON
 from hydroai.config.paths import data_dir, data_file, config_file, project_root
+from hydroai.monitor import daemon_control
 from hydroai.config.io import (read_config, atomic_write_json, normalize_config,
                        merge_config, redact_config, validate_document, strip_redacted)
 import queue
@@ -164,6 +165,11 @@ def config_page():
                 if errors:
                     return jsonify({"error": "配置校验失败", "errors": errors}), 400
                 save_config(merged)
+                try:
+                    from hydroai.ai.health import clear_health_cache
+                    clear_health_cache()
+                except Exception:
+                    pass
                 emit("配置已更新")
                 return jsonify({"ok": True})
             manager = ConfigManager(str(path))
@@ -218,6 +224,11 @@ def models_add():
             raise ValueError('set_default 必须是 bool')
         with _config_lock:
             result = add_model(config_file('config.json', ROOT), **body)
+        try:
+            from hydroai.ai.health import clear_health_cache
+            clear_health_cache()
+        except Exception:
+            pass
         return jsonify(result)
     except (ValueError, TypeError, OSError):
         return jsonify({'error': '新增失败：请检查名称是否重复、URL、供应商和环境变量名'}), 400
@@ -239,11 +250,15 @@ def pricing_status():
 @app.route("/status")
 def status():
     with _state_lock:
+        task = task_running
         proc = daemon_proc
-        return jsonify({
-            "task_running": task_running,
-            "daemon_running": bool(proc and proc.poll() is None),
-        })
+    daemon = daemon_control.status()
+    running = daemon["running"] or bool(proc and proc.poll() is None)
+    return jsonify({
+        "task_running": task,
+        "daemon_running": running,
+        "daemon_pid": daemon["pid"],
+    })
 
 
 # ── 后台任务 / 守护进程 ──
@@ -275,6 +290,7 @@ def run_named(name):
     if (not isinstance(args, list) or len(args) > 30
             or not all(isinstance(arg, str) and len(arg) <= 2000 for arg in args)):
         return jsonify({"error": "参数必须是字符串数组"}), 400
+
     if not _start_task([name + ".py", *args]):
         return jsonify({"error": "已有任务在运行"}), 409
     return jsonify({"ok": True})
@@ -300,47 +316,106 @@ def _watch_daemon(proc: subprocess.Popen):
     except Exception as exc:
         emit(f"守护进程异常: {exc}")
     finally:
+        daemon_control.remove_pid(proc.pid)
         with _state_lock:
             if daemon_proc is proc:
                 daemon_proc = None
 
 
+def _terminate_proc(proc: subprocess.Popen, timeout: float = 5.0) -> bool:
+    if proc is None or proc.poll() is not None:
+        return True
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, text=True, timeout=timeout + 5)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=timeout)
+        return True
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return proc.poll() is not None
+
+
+def _daemon_cmd() -> list[str]:
+    extra = shlex.split(os.environ.get("WEBUI_DAEMON_ARGS", ""))
+    return [sys.executable, "-u", str(ROOT / "contest_daemon.py"),
+            "--no-interactive", *extra]
+
+
+def _spawn_daemon() -> tuple[bool, str]:
+    """启动守护进程并等待 PID；Web 与 Docker 自动启动共用。"""
+    global daemon_proc
+    if daemon_control.is_running():
+        return True, ""
+    with _state_lock:
+        current = daemon_proc
+    if current and current.poll() is None:
+        return True, ""
+    try:
+        proc = subprocess.Popen(
+            _daemon_cmd(), cwd=str(data_dir(ROOT)), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace", start_new_session=True)
+    except OSError as exc:
+        return False, f"启动失败: {type(exc).__name__}"
+    with _state_lock:
+        daemon_proc = proc
+    threading.Thread(target=_watch_daemon, args=(proc,), daemon=True).start()
+
+    # 等待 PID 文件出现；能提前发现“启动后立即退出”并反馈给 Web。
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        if daemon_control.is_running() or proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    if proc.poll() is not None:
+        return False, f"守护进程启动失败 (exit {proc.returncode})"
+    return True, ""
+
+
 @app.route("/daemon/<action>", methods=["POST"])
-def daemon_control(action):
+def daemon_action(action):
     if not _check_auth():
         return jsonify({"error": "未授权"}), 403
-    global daemon_proc
-    with _state_lock:
-        running = bool(daemon_proc and daemon_proc.poll() is None)
     if action == "start":
-        if running:
-            return jsonify({"ok": True, "daemon_running": True})
-        cmd = [sys.executable, "-u", str(ROOT / "contest_daemon.py"), "--no-interactive"]
-        try:
-            proc = subprocess.Popen(
-                cmd, cwd=str(data_dir(ROOT)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", start_new_session=True)
-        except OSError as exc:
-            return jsonify({"error": f"启动失败: {type(exc).__name__}"}), 500
-        with _state_lock:
-            daemon_proc = proc
+        ok, error = _spawn_daemon()
+        if not ok:
+            emit(error)
+            return jsonify({"error": error + "，请查看实时控制台"}), 500
         emit("守护进程已启动")
-        threading.Thread(target=_watch_daemon, args=(proc,), daemon=True).start()
-        return jsonify({"ok": True, "daemon_running": True})
+        return jsonify({"ok": True, "daemon_running": True,
+                        "daemon_pid": daemon_control.read_pid()})
+
     if action == "stop":
         with _state_lock:
             proc = daemon_proc
-        if not proc or proc.poll() is not None:
-            return jsonify({"ok": True, "daemon_running": False})
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        emit("守护进程已收到停止信号")
+        stopped = daemon_control.stop()
+        if not stopped and proc and proc.poll() is None:
+            # 兼容旧版本没有 PID 文件的守护进程
+            stopped = _terminate_proc(proc)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if not daemon_control.is_running() and (not proc or proc.poll() is not None):
+                break
+            time.sleep(0.1)
+        running = daemon_control.is_running() or bool(proc and proc.poll() is None)
+        if running:
+            return jsonify({"error": "停止守护进程超时，请查看实时控制台",
+                            "daemon_running": True}), 500
+        emit("守护进程已停止")
         return jsonify({"ok": True, "daemon_running": False})
+
     if action == "once":
         if not _start_task(["contest_daemon.py", "--once", "--no-interactive"]):
             return jsonify({"error": "已有任务在运行"}), 409
@@ -637,6 +712,10 @@ def main():
 
     print(f"[*] OJ Solver WebUI 启动: http://{_args.host}:{_args.port}")
     if AUTH_TOKEN: print("[*] 已启用鉴权 Token")
+    if os.environ.get("WEBUI_AUTOSTART_DAEMON", "").strip().lower() in (
+            "1", "true", "yes", "on"):
+        ok, error = _spawn_daemon()
+        print("[*] 守护进程已自动启动" if ok else f"[-] 守护进程自动启动失败: {error}")
     run_simple(_args.host, _args.port, app, use_reloader=False,
                use_debugger=_args.debug, threaded=True)
 

@@ -30,5 +30,7 @@ model_prices.json
 *.db
 *.db-wal
 *.db-shm
+*.pid
+*.pid.tmp
 tests
 pytest.ini

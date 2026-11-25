@@ -84,6 +84,18 @@ def test_prune_removes_old_rows(tmp_path):
     assert store.summary()["requests"] == 1
 
 
+def test_notification_allowed_once_per_error_and_config_version(tmp_path):
+    store = _store(tmp_path)
+    auth = "ai_unavailable:auth:requester"
+    network = "ai_unavailable:network:requester"
+    assert store.notification_allowed(auth, "v1") is True
+    assert store.notification_allowed(auth, "v1") is False
+    assert store.notification_allowed(network, "v1") is True
+    # 配置版本变化后，所有错误类型可以再次通知。
+    assert store.notification_allowed(auth, "v2") is True
+    assert store.notification_allowed(network, "v2") is True
+
+
 def test_prune_if_due_is_throttled_by_meta(tmp_path):
     store = _store(tmp_path)
     old = time.time() - 10 * 86400

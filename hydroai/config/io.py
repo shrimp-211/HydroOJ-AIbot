@@ -121,9 +121,12 @@ def validate_document(data: dict) -> list[str]:
             errors.append(f'{key}: 需要 http(s) URL')
     for key in ('ai_max_tokens', 'verify_timeout', 'monitor_interval', 'contest_start_page', 'pricing_refresh_hours', 'agent_max_steps',
                 'agent_max_submissions', 'agent_max_seconds', 'agent_run_timeout', 'solve_candidates',
-                'usage_retention_days'):
+                'usage_retention_days', 'ai_health_check_timeout'):
         if key in data and (type(data[key]) is not int or data[key] <= 0):
             errors.append(f'{key}: 必须是正整数')
+    if 'ai_health_check_ttl' in data and (type(data['ai_health_check_ttl']) is not int
+                                          or data['ai_health_check_ttl'] < 0):
+        errors.append('ai_health_check_ttl: 必须是非负整数')
     from hydroai.ai.pricing import valid_rate
     quotas = data.get('quotas', {})
     if quotas is not None and not isinstance(quotas, dict):

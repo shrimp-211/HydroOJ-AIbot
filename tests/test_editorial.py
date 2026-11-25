@@ -57,8 +57,10 @@ def _cfg(tmp_path, **over):
     fixture = root / "config" / "config.json"
     if not fixture.exists():
         fixture = root / "config.json"
+    overrides = {"ai_health_check_enable": False}
+    overrides.update(over)
     return Config(config_path=str(fixture if fixture.exists() else tmp_path / "none.json"),
-                  cli_overrides=over)
+                  cli_overrides=overrides)
 
 
 class TestValidate:

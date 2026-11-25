@@ -461,9 +461,30 @@ class SolverOrchestrator:
     def __init__(self, oj: OJClient, ai: AIClient, config: Config):
         self.oj = oj; self.ai = ai; self.config = config
 
-    def solve(self, pid: str, *, submit: bool = True, post: bool = True,
-              max_retries: int = 3, use_stream: bool = False, contest_id: str = "",
-              outer_retries: int = 3, accumulate: bool = True):
+    def solve(self, pid: str, **kwargs):
+        """任务包装：AI 全部不可用时中止并只通知一次。"""
+        from hydroai.ai.health import AIUnavailableError, failure_message, should_notify
+        try:
+            return self._solve(pid, **kwargs)
+        except AIUnavailableError as exc:
+            health = getattr(exc, "health", {}) or {}
+            message = str(exc) or failure_message(health)
+            log.error(message)
+            print(message, flush=True)
+            # 比赛/守护模式由 contest 主流程统一推送到推送名单，避免重复。
+            if not os.environ.get("OJ_PUSH_LIST"):
+                if should_notify(self.config, health, channel="requester"):
+                    self._notify_error(message)
+            return {
+                "is_ac": False, "ai_unavailable": True, "error": message,
+                "ai_health": health, "final_verdict": None,
+                "total_usage": {}, "total_cost": 0, "total_elapsed": 0,
+                "model": "", "is_cost_capped": False,
+            }
+
+    def _solve(self, pid: str, *, submit: bool = True, post: bool = True,
+               max_retries: int = 3, use_stream: bool = False, contest_id: str = "",
+               outer_retries: int = 3, accumulate: bool = True):
         """一键解题。
         Phase1: flash 快速尝试(不修正) → Phase2: 难度判断
         → Phase3: 三层循环 (外层升级模型 × 中层换思路2次 × 内层修正2次)
@@ -475,6 +496,7 @@ class SolverOrchestrator:
         if not self.oj.login():
             self._notify_error(f"❌ #{pid} 登录失败，请检查 OJ 凭据")
             return
+
         problem = self.oj.get_problem(pid)
         if not problem:
             self._notify_error(f"❌ #{pid} 获取题目失败，可能无权限或链接错误")

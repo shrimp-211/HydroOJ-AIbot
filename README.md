@@ -34,7 +34,7 @@ hydroai/
 tests/      离线测试（由 pytest.ini 指定 pythonpath）
 ```
 
-`oj_solver.py`、`contest_solver.py`、`contest_daemon.py`、`webui.py`、`config_cli.py` 等根目录脚本只是入口包装，原有命令保持不变。本地默认从 `config/` 读取 `config.json` 与 `.env`，并兼容旧根目录文件；`model_prices.json` 跟随配置文件目录。运行数据（`dashboard.json`、`usage.db`、`cost_accum.json`、Cookie、日志）仍写入 `OJ_DATA_DIR` 或当前工作目录。Docker 中 `OJ_DATA_DIR=/data`，`config.json` 与运行数据在持久化卷内；`.env` 由宿主机 `config/.env` 注入。
+`oj_solver.py`、`contest_solver.py`、`contest_daemon.py`、`webui.py`、`config_cli.py` 等根目录脚本只是入口包装，原有命令保持不变。本地默认从 `config/` 读取 `config.json` 与 `.env`，并兼容旧根目录文件；`model_prices.json` 跟随配置文件目录。运行数据（`dashboard.json`、`usage.db`、`daemon.pid`、`cost_accum.json`、Cookie、日志）仍写入 `OJ_DATA_DIR` 或当前工作目录。Docker 中 `OJ_DATA_DIR=/data`，`config.json` 与运行数据在持久化卷内；`.env` 由宿主机 `config/.env` 注入。
 
 ## 本地安装
 
@@ -115,19 +115,19 @@ docker compose --env-file config/.env up -d web
 打开 [http://127.0.0.1:5000](http://127.0.0.1:5000)，进入「配置 → 访问设置」，填写 `WEBUI_AUTH_TOKEN` 后刷新配置。
 `config/.env` 的 `WEBUI_PORT` 可修改宿主机端口，例如 `WEBUI_PORT=8080`。
 
-默认只启动 Web 面板。要开启比赛自动处理，再执行：
+Web 与守护进程运行在**同一个容器**中，不再有单独的 daemon 服务。Web 默认随启动自动拉起守护进程（`WEBUI_AUTOSTART_DAEMON=1`），可在「比赛守护」卡片停止、重启或执行一次检查。
 
-```bash
-docker compose --env-file config/.env --profile worker up -d
+只希望手动启动守护进程时，在 `config/.env` 设置：
+
+```dotenv
+WEBUI_AUTOSTART_DAEMON=0
 ```
 
-守护进程默认包含进行中的比赛。只处理已结束的比赛，可把 `compose.yaml` 的 daemon 命令改为：
+守护参数通过 `WEBUI_DAEMON_ARGS` 传入，例如只处理已结束的比赛：
 
-```yaml
-command: [daemon, --no-interactive, --ended-only]
+```dotenv
+WEBUI_DAEMON_ARGS=--ended-only
 ```
-
-Compose 的 profiles 用法见 [Docker 官方文档](https://docs.docker.com/compose/how-tos/profiles/)。
 
 ### 容器命令
 
@@ -191,37 +191,36 @@ docker run --rm --init --env-file config/.env -v hydrooj-data:/data hydrooj-aibo
 
 - `/app`：镜像中的代码与提示词；升级镜像会更新它们。
 - `/tmp`：可执行的临时内存文件系统，供本地编译、样例验证和数据生成使用，容器停止后清空。
-- `/data`：命名卷，保存 `config.json`、`usage.db` 逐请求统计、费用统计、处理记录、Cookie、日志、本地验证目录和生成数据。
+- `/data`：命名卷，保存 `config.json`、`usage.db` 逐请求统计、`daemon.pid`、费用统计、处理记录、Cookie、日志、本地验证目录和生成数据。
 - 宿主机 `config/.env`：由 Compose 注入环境变量，不会复制到镜像。变量优先于卷内 JSON 配置；修改后需要重新创建服务。
 
 ```bash
-# 查看状态和日志
+# 查看状态和日志（Web 与守护进程在同一容器）
 docker compose --env-file config/.env ps
-docker compose --env-file config/.env logs -f web daemon
+docker compose --env-file config/.env logs -f web
 
 # 拉取更新、重建并启动
 git pull --ff-only
 docker compose --env-file config/.env build
-docker compose --env-file config/.env --profile worker up -d --force-recreate
+docker compose --env-file config/.env up -d --force-recreate
 
 # 停止服务，保留数据卷
-docker compose --env-file config/.env --profile worker down
+docker compose --env-file config/.env down
 ```
 
-备份时先停止 daemon，保持 web 容器可用于复制，避免后台任务同时写入。创建宿主机 `backups` 目录后执行：
+备份时先在 Web「比赛守护」停止守护，或从容器内停止，再复制 `/data`：
 
 ```bash
-docker compose --env-file config/.env stop daemon
+docker compose --env-file config/.env exec web python -c "from hydroai.monitor import daemon_control; daemon_control.stop()"
 docker compose --env-file config/.env cp web:/data/. ./backups/
 ```
 
 恢复到现有 web 容器时：
 
 ```bash
-docker compose --env-file config/.env stop daemon
 docker compose --env-file config/.env cp ./backups/. web:/data/
 docker compose --env-file config/.env run --rm --user 0 --cap-add CHOWN --entrypoint chown cli -R 10001:10001 /data
-docker compose --env-file config/.env --profile worker up -d
+docker compose --env-file config/.env restart web
 ```
 
 `down -v` 会删除数据卷；普通 `down` 会保留数据。详细卷管理见 [Docker 数据卷文档](https://docs.docker.com/engine/storage/volumes/)。
@@ -470,6 +469,28 @@ DeepSeek / 智谱官方端点保留旧配置的 thinking 默认行为。代理�
 
 其他节省方式：首轮 AC 后跳过难度请求；修正仅保留完整题面、当前代码、最近失败摘要和最新反馈；题解模型只写讲解，AC 代码由程序插入。
 `compact_history: false` 可恢复完整修复历史。流式计量支持最后一个无 choices 的 usage 包；缓存命中 token 不再重复按普通输入价计费。
+
+### AI 错误处理、额度与通知
+
+不在任务开始前主动消耗 token 探测。只有真实 AI 请求返回鉴权/限流/网络/服务端错误时，才检查是否所有 AI 都不可用：
+
+1. 优先查询已配置的 `quotas`（`kind=balance/plan`，即余额/套餐额度）；任一渠道仍有剩余，认为 AI 可用，任务继续按原逻辑重试或换模型。
+2. 没有可用的额度信息时，才回退到一次极小请求探测（最多 12 个模型）。
+3. 全部不可用时，单题、比赛、标程、测试数据任务中止；带 `OJ_REQUESTER` 的私信回复请求者，守护/比赛模式向 `msg_push_list` 推送 `ai_unavailable`；Web 实时控制台显示错误。
+4. 同一错误类型（`auth` / `rate_limit` / `network` / `server` / `quota` 等组合）在配置未变更前只通知一次；配置 mtime 变化后重新允许通知。通知账本存于 `usage.db` 的 meta 表，按“配置版本 + 错误类型 + 通道”去重。
+
+```json
+{
+  "ai_health_check_enable": true,
+  "ai_health_check_ttl": 300,
+  "ai_health_check_timeout": 15,
+  "msg_push_events": {"ai_unavailable": true}
+}
+```
+
+`ttl=0` 表示每次触发都重新检查；失败原因只包含额度项/模型名、异常类型和 HTTP 状态，不输出 Key、URL 或响应正文。`--dry-run` 不调用 AI，不会触发。
+
+Web 的「比赛守护」卡片可启动、停止或执行一次检查。守护进程把 PID 写入数据目录的 `daemon.pid`，因此 Web 重启后仍能识别并停止此前启动的守护进程；`/status` 同时返回 `daemon_running` 与 `daemon_pid`。启动失败会在任务消息和实时控制台中显示退出码。Docker 中 Web 与守护进程共用一个容器，默认自动启动守护进程。
 
 ### 多模型与难度路由
 

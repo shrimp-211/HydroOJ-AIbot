@@ -15,7 +15,8 @@ from hydroai.config.manager import ConfigManager
 
 def config(tmp_path, **model):
     path = tmp_path / 'config.json'
-    path.write_text(json.dumps({'ai_model': 'm', 'models': {'m': {
+    path.write_text(json.dumps({'ai_model': 'm', 'ai_health_check_enable': False,
+                                'models': {'m': {
         'api_key': 'sk-test', 'base_url': 'https://example.test/v1',
         'max_tokens': 8000, **model}}}), encoding='utf-8')
     return ConfigManager(str(path))
@@ -98,6 +99,28 @@ def test_rate_limit_marker_shared_by_generation_and_chat(tmp_path, stream):
         r = ai.chat([{'role': 'user', 'content': 'hi'}], use_stream=stream)
         assert r['_rate_limited'] and not r['content']
         assert ai._call_ai('hi', 'system', use_stream=stream)['_rate_limited']
+
+
+def test_api_error_raises_when_health_reports_unavailable(tmp_path, monkeypatch):
+    ai = AIClient(config(tmp_path))
+    ai.config.set_override(ai_health_check_enable=True)
+
+    class Boom(Exception):
+        status_code = 401
+
+    def explode(*args, **kwargs):
+        raise Boom('unauthorized')
+
+    monkeypatch.setattr(ai, '_get_client', lambda *args, **kwargs: object())
+    monkeypatch.setattr(ai, '_block_call', explode)
+    import hydroai.ai.health as health
+    monkeypatch.setattr(health, 'check_ai_health', lambda *args, **kwargs: {
+        'available': False, 'reason': 'm: HTTP 401',
+        'error_type': 'ai_unavailable:auth'})
+    from hydroai.ai.health import AIUnavailableError
+    with pytest.raises(AIUnavailableError):
+        ai.chat([{'role': 'user', 'content': 'hi'}])
+    assert ai.unavailable is True
 
 
 def test_truncated_completion_accounted_but_not_submitted(tmp_path):

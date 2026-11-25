@@ -5,6 +5,8 @@ x-runtime: &runtime
   env_file: ./config/.env
   environment:
     WEBUI_AUTH_TOKEN: ${WEBUI_AUTH_TOKEN:?Please set WEBUI_AUTH_TOKEN in config/.env}
+    # Web 与守护进程同容器：默认随 Web 自动启动，可在 Web 中停止。
+    WEBUI_AUTOSTART_DAEMON: ${WEBUI_AUTOSTART_DAEMON:-1}
   volumes:
     - data:/data
   read_only: true
@@ -31,12 +33,6 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
-
-  daemon:
-    <<: *runtime
-    profiles: [worker]
-    command: [daemon, --no-interactive]
-    restart: unless-stopped
 
   cli:
     <<: *runtime

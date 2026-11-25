@@ -536,7 +536,7 @@ class TestSolveFlowOffline:
         # 工件（dashboard.json / cost_accum.json）则写在隔离的 tmp 目录里。
         fixture = Path(__file__).resolve().parents[1] / "config" / "config.example.json"
         # 这些用例覆盖的是原三层循环；agent 路径由 TestSolverAgent 单独覆盖
-        overrides = {"agent_enabled": False}
+        overrides = {"agent_enabled": False, "ai_health_check_enable": False}
         overrides.update(cli or {})
         cfg = Config(config_path=str(fixture if fixture.exists() else tmp_path / "none.json"),
                      cli_overrides=overrides)
@@ -613,3 +613,23 @@ class TestDifficultyToggle:
         from hydroai.ai.router import ModelRouter
         default_model = ModelRouter(Config(config_path=str(fixture))).default.model
         assert default_model in oj.submitted[-1]
+
+
+def test_solver_stops_when_ai_unavailable_error_raised(tmp_path, monkeypatch):
+    from hydroai.ai.health import AIUnavailableError
+    cfg = Config(config_path=str(tmp_path / "none.json"),
+                 cli_overrides={"ai_health_check_enable": True})
+    oj = _FakeOJ(cfg, [])
+    ai = _FakeAI(cfg)
+
+    def boom(*args, **kwargs):
+        raise AIUnavailableError(
+            "all down",
+            {"available": False, "reason": "m: HTTP 503",
+             "error_type": "ai_unavailable:server"})
+
+    monkeypatch.setattr(ai, "_call_ai", boom)
+    result = SolverOrchestrator(oj, ai, cfg).solve(
+        "1178", submit=True, post=True, accumulate=False)
+    assert result["ai_unavailable"] is True
+    assert oj.submitted == [] and ai.calls == []

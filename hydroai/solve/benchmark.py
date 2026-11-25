@@ -456,6 +456,15 @@ class BenchmarkSolver:
 # CLI
 # ═══════════════════════════════════════════════
 def main():
+    from hydroai.ai.health import AIUnavailableError
+    try:
+        return _main()
+    except AIUnavailableError as exc:
+        log.error(str(exc))
+        sys.exit(1)
+
+
+def _main():
     load_dotenv()
     from hydroai.oj.common import setup_logging
     logging.basicConfig(level=logging.INFO,

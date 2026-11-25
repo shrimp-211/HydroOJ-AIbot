@@ -106,6 +106,10 @@ class AIClient:
         self._unknown_price_warned = set()
         # 由求解器设置，用于把本次 AI 调用归到具体题目（逐请求统计）。
         self.problem_id = ""
+        # 一旦确认所有 AI 不可用，本次任务后续调用直接快速失败。
+        self.unavailable = False
+        self.unavailable_health: dict | None = None
+        self.unavailable_reason = ""
         try:
             if config.get("usage_stats_enable", True):
                 get_store().prune_if_due(config.get("usage_retention_days", 365))
@@ -282,6 +286,10 @@ class AIClient:
              max_tokens: int = 0, effort: str = "", task: str = "chat") -> dict | None:
         """One request path for every caller. Failed responses never contain usable code."""
         model = model or self.config["ai_model"]
+        if self.unavailable:
+            from hydroai.ai.health import AIUnavailableError, failure_message
+            raise AIUnavailableError(failure_message(self.unavailable_health or {}),
+                                     self.unavailable_health)
         t_start = time.monotonic()
         try:
             if self._get_client(model) is None:
@@ -298,6 +306,26 @@ class AIClient:
             elapsed = time.monotonic() - t_start
             log.error("[-] AI 请求失败: model=%s type=%s status=%s",
                       model, type(exc).__name__, status)
+
+            # 只在真实的鉴权/限流/网络/服务端错误后检查，普通 400/404 不触发。
+            trigger_health = (status in (401, 403, 429) or status is None
+                              or (isinstance(status, int) and status >= 500))
+            if trigger_health:
+                from hydroai.ai.health import (AIUnavailableError, check_ai_health,
+                                               failure_message)
+                try:
+                    health = check_ai_health(self.config, ai=self, force=True)
+                except Exception as check_exc:
+                    log.warning("[AI 预检] 异常，继续任务: %s", type(check_exc).__name__)
+                    health = {"available": True}
+                if not health.get("available", True):
+                    self.unavailable = True
+                    self.unavailable_health = health
+                    self.unavailable_reason = str(health.get("reason") or "")
+                    self._record_usage(model, {}, 0.0, False, elapsed,
+                                       use_stream, False, task)
+                    raise AIUnavailableError(failure_message(health), health) from exc
+
             if status == 429:
                 self._record_usage(model, {}, 0.0, False, elapsed, use_stream, False, task)
                 return {"_rate_limited": True, "content": "", "usage": {}, "cost": 0,

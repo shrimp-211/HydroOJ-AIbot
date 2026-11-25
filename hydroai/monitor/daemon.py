@@ -7,6 +7,7 @@ import sys
 import json
 import queue
 import time
+import atexit
 import signal
 import logging
 import threading
@@ -17,6 +18,7 @@ from datetime import datetime, timezone
 import requests
 from hydroai.oj.catalog import list_contests, positive_int
 from hydroai.config.paths import data_dir, project_root
+from hydroai.monitor import daemon_control
 from hydroai.oj.common import (load_dotenv, create_session,
                         parse_contest_or_problem, parse_problem_url, smart_login)
 
@@ -101,7 +103,7 @@ def _push_event(event: str, text: str):
     except Exception as e:
         log.debug("[!] push_event %s 异常: %s", event, e)
 
-def process_contest(contest: dict, solver_path: str, push_list: set = None) -> bool:
+def process_contest(contest: dict, solver_path: str, push_list: set = None) -> bool | str:
     url = contest["contest_url"]
     title = contest["title"]
     ts = datetime.now().strftime("%H:%M:%S")
@@ -116,6 +118,9 @@ def process_contest(contest: dict, solver_path: str, push_list: set = None) -> b
         env["OJ_PUSH_LIST"] = ",".join(str(x) for x in push_list)
     r = subprocess.run([sys.executable, solver_path, url],
                        cwd=str(data_dir(Path(solver_path).parent)), env=env)
+    if r.returncode == 2:
+        log.warning("[AI] 所有 AI 不可用，跳过本次比赛: %s", title)
+        return "ai_unavailable"
     if r.returncode == 0:
         log.info("[+] 完成: %s", title); return True
     log.error("[-] 失败 (exit %d): %s", r.returncode, title); return False
@@ -152,6 +157,25 @@ def main():
         log.warning("[配置] %d 个警告 (详见上方)", len(warnings))
     else:
         log.info("[配置] 完整性检查通过")
+
+    if not args.once:
+        existing = daemon_control.read_pid()
+        if existing and existing != os.getpid() and daemon_control.pid_alive(existing):
+            log.error("[-] 已有守护进程运行 (PID %d)，拒绝重复启动", existing)
+            sys.exit(1)
+        daemon_control.write_pid(os.getpid())
+        atexit.register(lambda: daemon_control.remove_pid(os.getpid()))
+
+        def _handle_sigterm(signum, frame):
+            daemon_control.remove_pid(os.getpid())
+            os._exit(0)
+
+        try:
+            signal.signal(signal.SIGTERM, _handle_sigterm)
+        except (ValueError, OSError):
+            pass
+        log.info("[*] PID 文件: %s", daemon_control.pid_path())
+
     root = args.root or c.oj_root
     username = c.username or os.environ.get("OJ_USERNAME", "")
     password = c.password or os.environ.get("OJ_PASSWORD", "")
@@ -230,6 +254,9 @@ def main():
                 c = futures[f]
                 try:
                     ok = f.result()
+                    if ok == "ai_unavailable":
+                        log.warning("[AI] %s 因 AI 不可用跳过，稍后重试", c['title'][:30])
+                        continue
                     if ok:
                         processed.add(c["cid"]); save_state(state_file, processed)
                         log.info("[+] 已记录: %s — %s", c['domain'], c['title'][:30])
@@ -518,6 +545,7 @@ def main():
 
     last_check = time.time()
     while True:
+        daemon_control.heartbeat()
         try:
             now = time.time()
             if now - last_check >= interval:
@@ -570,6 +598,7 @@ def main():
     # run_check 的 ThreadPoolExecutor 工作线程为非 daemon，若其 worker
     # 正卡在 contest_solver 子进程等待上，解释器退出会 join 等待 worker，
     # 导致 exit 指令卡住数分钟。
+    daemon_control.remove_pid(os.getpid())
     log.info("[*] 守护进程退出")
     os._exit(0)
 

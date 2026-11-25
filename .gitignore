@@ -24,6 +24,8 @@ usage.db
 usage.db-wal
 usage.db-shm
 usage.db-journal
+daemon.pid
+daemon.pid.tmp
 model_prices.json
 agent_work/
 benchmark_processed.json

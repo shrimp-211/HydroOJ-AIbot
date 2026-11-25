@@ -113,8 +113,11 @@ def solve_one(problem_url, cookie_jar, submit, contest_id="", accum=True):
             accumulate=accum)
         verdict = result.get("final_verdict") if result and isinstance(result, dict) else None
         usage = result.get("total_usage", {}) if result else {}
+        ai_health = result.get("ai_health") if result and isinstance(result, dict) else None
         return {
             "pid": pid, "ok": True,
+            "ai_unavailable": bool(result.get("ai_unavailable")) if result else False,
+            "ai_health": ai_health or {},
             "score": verdict["score"] if verdict else None,
             "is_ac": verdict.get("is_ac") if verdict else False,
             "time_ms": verdict.get("time_ms") if verdict else 0,
@@ -249,6 +252,7 @@ def main():
     log.info("[*] 已提交 %d 个任务，%d 线程并行处理中...", len(pending_tasks), args.workers)
     requester = int(os.environ.get("OJ_REQUESTER", 0))
     results = {}
+    ai_failure_health = None
     # 全局统计（在 pending_tasks 块外初始化，避免全跳过时 UnboundLocalError）
     total_tokens_in = total_tokens_out = total_cache = total_cost = total_elapsed = 0.0
     model_stats = {}  # {model: {tokens_in, tokens_out, cache, cost, count, ac}}
@@ -263,6 +267,8 @@ def main():
                 results[title] = {"success": [], "failed": [], "total": len([x for x in pending_tasks if x[2] == title])}
             try:
                 r = f.result()
+                if r.get("ai_unavailable") and ai_failure_health is None:
+                    ai_failure_health = r.get("ai_health") or {}
                 rcnt = r.get("retry_count", 0)
                 # 累计统计
                 ti, to, ch, ct = r.get("tokens_in", 0), r.get("tokens_out", 0), r.get("cache_hit", 0), r.get("cost", 0)
@@ -318,6 +324,14 @@ def main():
             log.info("  #%d %s: %d题 AC%d | Token %di/%do | 缓存%d | ¥%.4f",
                      i, m, s["count"], s["ac"], s["tokens_in"], s["tokens_out"], s["cache"], s["cost"])
     log.info("=" * 60)
+    if ai_failure_health:
+        from hydroai.ai.health import failure_message, should_notify
+        message = failure_message(ai_failure_health)
+        log.error(message)
+        channel = "push" if os.environ.get("OJ_PUSH_LIST") else "requester"
+        if should_notify(cfg, ai_failure_health, channel=channel):
+            _push(message, event="ai_unavailable")
+        sys.exit(2)
     if all_failed: sys.exit(1)
 
 

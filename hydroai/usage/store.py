@@ -376,6 +376,31 @@ class UsageStore:
             log.warning("[用量] 清理失败: %s", type(exc).__name__)
             return 0
 
+    def notification_allowed(self, key: str, version: str) -> bool:
+        """通知去重：同一 key 在配置版本变更前只返回一次 True。"""
+        now = time.time()
+        try:
+            with self._db() as con:
+                con.execute("BEGIN IMMEDIATE")   # 跨进程原子地检查+写入
+                row = con.execute("SELECT value FROM meta WHERE key='notify_version'").fetchone()
+                current = row["value"] if row else ""
+                if current != str(version):
+                    con.execute("DELETE FROM meta WHERE key LIKE 'notify:%'")
+                    con.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('notify_version', ?)",
+                        (str(version),))
+                exists = con.execute(
+                    "SELECT 1 FROM meta WHERE key=?", (f"notify:{key}",)).fetchone()
+                if exists:
+                    return False
+                con.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?)",
+                    (f"notify:{key}", str(now)))
+                return True
+        except sqlite3.Error as exc:
+            log.warning("[通知] 去重检查失败: %s", type(exc).__name__)
+            return True
+
     def prune_if_due(self, retention_days=365, *, interval_hours=24) -> int:
         """按保留天数清理，并用 meta 表把频率限制为每 N 小时一次。
 
