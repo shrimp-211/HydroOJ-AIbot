@@ -61,6 +61,9 @@ jobs:
           docker tag hydrooj-aibot:local "$IMAGE_NAME:latest"
           docker push "$IMAGE_NAME:$IMAGE_TAG"
           docker push "$IMAGE_NAME:latest"
+          VERSION="$(python3 -c 'import hydroai; print(hydroai.__version__)')"
+          docker tag hydrooj-aibot:local "$IMAGE_NAME:v$VERSION"
+          docker push "$IMAGE_NAME:v$VERSION"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             SAFE_TAG="${REF_NAME//\//-}"
             docker tag hydrooj-aibot:local "$IMAGE_NAME:$SAFE_TAG"
@@ -70,6 +73,7 @@ jobs:
             echo "### Docker image published"
             echo "- \`$IMAGE_NAME:$IMAGE_TAG\`"
             echo "- \`$IMAGE_NAME:latest\`"
+            echo "- \`$IMAGE_NAME:v$VERSION\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Container logs and cleanup
