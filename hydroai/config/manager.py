@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from hydroai.config.io import read_config, atomic_write_json, env_reference
-from hydroai.config.paths import data_file
+from hydroai.config.paths import config_file
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ class ConfigManager:
 
     def __init__(self, config_path: str | None = None, auto_reload: bool = False,
                  cli_overrides: dict | None = None):
-        self._path = Path(config_path) if config_path is not None else data_file("config.json")
+        self._path = Path(config_path) if config_path is not None else config_file("config.json")
         self._config = AppConfig()
         self._lock = threading.RLock()
         self._mtime: float = 0

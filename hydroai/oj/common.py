@@ -3,7 +3,7 @@ OJ Solver — 共享模块
 提供所有脚本共用的：配置加载、登录、Cookie 管理、日志配置
 """
 
-from hydroai.config.paths import data_file
+from hydroai.config.paths import config_file
 import os
 import re
 import json
@@ -247,7 +247,7 @@ def load_dotenv(env_path: str | None = None):
     支持 `export KEY=value`、行内注释、单双引号包裹的值，以及 Windows 下
     用记事本保存出的 UTF-8 BOM。
     """
-    p = Path(env_path) if env_path is not None else data_file(".env")
+    p = Path(env_path) if env_path is not None else config_file(".env")
     if not p.exists():
         return
     with open(p, "r", encoding="utf-8-sig") as f:
@@ -280,7 +280,7 @@ def load_dotenv(env_path: str | None = None):
 def load_config(config_path: str | None = None) -> dict:
     """Read the shared config location, including legacy field normalization."""
     from hydroai.config.io import read_config
-    return read_config(config_path if config_path is not None else data_file("config.json"))
+    return read_config(config_path if config_path is not None else config_file("config.json"))
 
 
 # ═══════════════════════════════════════════════════════════════

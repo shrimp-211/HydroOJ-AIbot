@@ -20,7 +20,7 @@ from hydroai.config.paths import data_file
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
     payload    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_quota_ts ON quota_snapshots(ts);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 GROUP_FIELDS = {"model", "provider", "task", "day", "hour", "problem_id"}
@@ -370,6 +374,34 @@ class UsageStore:
                 return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         except sqlite3.Error as exc:
             log.warning("[用量] 清理失败: %s", type(exc).__name__)
+            return 0
+
+    def prune_if_due(self, retention_days=365, *, interval_hours=24) -> int:
+        """按保留天数清理，并用 meta 表把频率限制为每 N 小时一次。
+
+        AIClient 会在每次求解进程启动时调用；由于检查与删除在同一事务中，
+        多进程并发时也只有一个进程会真正执行 DELETE。
+        """
+        retention_days = max(1, int(retention_days))
+        interval_hours = max(1, int(interval_hours))
+        now = time.time()
+        try:
+            with self._db() as con:
+                row = con.execute("SELECT value FROM meta WHERE key='last_prune'").fetchone()
+                try:
+                    last = float(row["value"]) if row else 0.0
+                except (TypeError, ValueError):
+                    last = 0.0
+                if now - last < interval_hours * 3600:
+                    return 0
+                con.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_prune', ?)",
+                    (str(now),))
+                cutoff = now - retention_days * 86400
+                cur = con.execute("DELETE FROM requests WHERE ts < ?", (cutoff,))
+                return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        except sqlite3.Error as exc:
+            log.warning("[用量] 自动清理失败: %s", type(exc).__name__)
             return 0
 
 

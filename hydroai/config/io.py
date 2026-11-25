@@ -77,6 +77,21 @@ def redact_config(data):
     return result
 
 
+def strip_redacted(data):
+    """Remove UI-only ``*_configured`` markers before persisting a config patch.
+
+    The Web UI receives redacted secrets as ``api_key_configured: true`` etc.
+    Those values must never be written back; omitting the original key lets the
+    deep merge keep the stored credential.
+    """
+    if isinstance(data, dict):
+        return {key: strip_redacted(value) for key, value in data.items()
+                if not (isinstance(key, str) and key.endswith('_configured'))}
+    if isinstance(data, list):
+        return [strip_redacted(item) for item in data]
+    return data
+
+
 def merge_config(current, patch):
     result = deepcopy(current)
     for key, value in patch.items():

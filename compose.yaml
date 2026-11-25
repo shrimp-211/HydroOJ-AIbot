@@ -2,9 +2,9 @@ x-runtime: &runtime
   image: ${IMAGE:-hydrooj-aibot:local}
   build: .
   init: true
-  env_file: .env
+  env_file: ./config/.env
   environment:
-    WEBUI_AUTH_TOKEN: ${WEBUI_AUTH_TOKEN:?Please set WEBUI_AUTH_TOKEN in .env}
+    WEBUI_AUTH_TOKEN: ${WEBUI_AUTH_TOKEN:?Please set WEBUI_AUTH_TOKEN in config/.env}
   volumes:
     - data:/data
   read_only: true

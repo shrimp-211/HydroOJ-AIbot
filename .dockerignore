@@ -5,9 +5,11 @@ __pycache__
 .pytest_cache
 *.pyc
 .env
-.env.*
+config/.env
 .ssh
 config.json
+config/config.json
+config/model_prices.json
 config (*).json
 *.pem
 *.key

@@ -53,7 +53,10 @@ class _FakeAI(AIClient):
 
 
 def _cfg(tmp_path, **over):
-    fixture = Path(__file__).resolve().parents[1] / "config.json"
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "config" / "config.json"
+    if not fixture.exists():
+        fixture = root / "config.json"
     return Config(config_path=str(fixture if fixture.exists() else tmp_path / "none.json"),
                   cli_overrides=over)
 

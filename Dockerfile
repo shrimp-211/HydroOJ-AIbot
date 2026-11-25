@@ -17,7 +17,9 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 # Root entry scripts stay at /app; implementation and resources live in the package.
-COPY *.py config.example.json ./
+COPY *.py ./
+# Ship templates only; real config/.env and config/config.json stay on the host or /data.
+COPY config/config.example.json config/.env.example config/.env.docker.example ./config/
 COPY hydroai/ ./hydroai/
 
 USER 10001:10001

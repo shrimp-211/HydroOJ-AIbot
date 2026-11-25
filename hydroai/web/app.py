@@ -9,10 +9,11 @@ import os
 import sys
 import json
 import time
+import secrets
 from hydroai.config.manager import ConfigManager, FIELD_TO_JSON
-from hydroai.config.paths import data_dir, data_file, project_root
+from hydroai.config.paths import data_dir, data_file, config_file, project_root
 from hydroai.config.io import (read_config, atomic_write_json, normalize_config,
-                       merge_config, redact_config, validate_document)
+                       merge_config, redact_config, validate_document, strip_redacted)
 import queue
 import shlex
 import signal
@@ -25,6 +26,8 @@ from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify, Response
 from werkzeug.serving import run_simple
 from hydroai.oj.common import load_config, load_dotenv, create_session, save_cookies, load_cookies, parse_root
+# 在处理并发请求前完成用量模块的初始化，避免首次打开用量页时抢占导入。
+from hydroai.usage import QuotaManager, get_store
 
 # 不在导入时加载 .env：Web 模块常被测试/WSGI 导入，模块级加载会把本地凭据
 # 注入进程并干扰其他配置来源。实际启动时在 main() 中加载。
@@ -47,10 +50,14 @@ task_running = False
 history: list[dict] = []
 AUTH_TOKEN = ""  # 如果设置，需要在请求头携带 X-Auth-Token
 ALLOWED_SCRIPTS = {"oj_solver", "contest_solver", "benchmark_solver", "testdata_supplement"}
+# EventSource 不能自定义请求头，因此用一次性的短时票据访问 /stream。
+STREAM_TICKET_TTL = 60
+_stream_tickets: dict[str, tuple[float, str]] = {}
+_stream_lock = threading.Lock()
 
 
 def save_config(cfg: dict):
-    atomic_write_json(data_file("config.json", ROOT), cfg)
+    atomic_write_json(config_file("config.json", ROOT), cfg)
 
 
 def broadcast(msg: str):
@@ -145,11 +152,11 @@ _config_lock = threading.Lock()
 def config_page():
     if not _check_auth():
         return jsonify({"error": "未授权"}), 403
-    path = data_file("config.json", ROOT)
+    path = config_file("config.json", ROOT)
     try:
         with _config_lock:
             if request.method == "POST":
-                patch = request.get_json(silent=True)
+                patch = strip_redacted(request.get_json(silent=True))
                 if not isinstance(patch, dict):
                     return jsonify({"error": "配置必须是 JSON 对象"}), 400
                 merged = merge_config(read_config(path), normalize_config(patch))
@@ -174,7 +181,7 @@ def config_doctor():
     if not _check_auth():
         return jsonify({"error": "未授权"}), 403
     from hydroai.config.cli import diagnose
-    return jsonify(diagnose(data_file("config.json", ROOT)))
+    return jsonify(diagnose(config_file("config.json", ROOT)))
 
 
 @app.route('/models/discover', methods=['POST'])
@@ -186,7 +193,7 @@ def models_discover():
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
             raise ValueError('需要 JSON 对象')
-        manager = ConfigManager(str(data_file('config.json', ROOT)))
+        manager = ConfigManager(str(config_file('config.json', ROOT)))
         name = body.get('model') or manager.ai_model
         if not isinstance(name, str) or (name != manager.ai_model and name not in manager.models):
             raise ValueError('请选择已经保存的模型连接')
@@ -210,7 +217,7 @@ def models_add():
         if 'set_default' in body and type(body['set_default']) is not bool:
             raise ValueError('set_default 必须是 bool')
         with _config_lock:
-            result = add_model(data_file('config.json', ROOT), **body)
+            result = add_model(config_file('config.json', ROOT), **body)
         return jsonify(result)
     except (ValueError, TypeError, OSError):
         return jsonify({'error': '新增失败：请检查名称是否重复、URL、供应商和环境变量名'}), 400
@@ -223,7 +230,7 @@ def pricing_status():
         return jsonify({'error': '未授权'}), 403
     from hydroai.config.cli import price_report
     try:
-        manager = ConfigManager(str(data_file('config.json', ROOT)))
+        manager = ConfigManager(str(config_file('config.json', ROOT)))
         return jsonify(price_report(manager, refresh=request.method == 'POST'))
     except (ValueError, TypeError, OSError):
         return jsonify({'error': '无法检查定价，请先修正配置'}), 400
@@ -343,7 +350,6 @@ def daemon_control(action):
 
 # ── 用量与额度 API ──
 def _usage_store():
-    from hydroai.usage.store import get_store
     return get_store(data_file("usage.db", ROOT))
 
 
@@ -411,8 +417,7 @@ _quota_lock = threading.Lock()
 def _quota_payload(refresh=False):
     """复用同一个额度管理器，远端余额才不会在每个请求里重复查询。"""
     global _quota_manager
-    from hydroai.usage.quota import QuotaManager
-    path = str(data_file("config.json", ROOT))
+    path = str(config_file("config.json", ROOT))
     try:
         with _quota_lock:
             current = getattr(getattr(_quota_manager, "config", None), "_path", None)
@@ -449,12 +454,16 @@ def _read_dashboard():
 
 @app.route("/api/stats")
 def api_stats():
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
     d = _read_dashboard()
-    history = d.get("history", [])
-    total = len(history)
-    ac = sum(1 for h in history if h.get("status") == "ac")
-    tokens = sum(h.get("tokens_in", 0) + h.get("tokens_out", 0) for h in history)
-    cost = sum(h.get("cost", 0) for h in history)
+    # history 里混有比赛记录（无 pid/status），不能计入题目数与 AC 率。
+    probs = [h for h in d.get("history", [])
+             if isinstance(h, dict) and "pid" in h]
+    total = len(probs)
+    ac = sum(1 for h in probs if h.get("status") == "ac")
+    tokens = sum(h.get("tokens_in", 0) + h.get("tokens_out", 0) for h in probs)
+    cost = sum(h.get("cost", 0) for h in probs)
     store = _usage_store()
     return jsonify({
         "total": total, "ac": ac, "fail": total - ac,
@@ -467,10 +476,13 @@ def api_stats():
 
 @app.route("/api/today")
 def api_today():
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
     today = datetime.now().strftime("%m-%d")
     d = _read_dashboard()
     today_records = [h for h in d.get("history", [])
-                     if h.get("finished_at", "").startswith(today)]
+                     if isinstance(h, dict) and "pid" in h
+                     and h.get("finished_at", "").startswith(today)]
     ac = sum(1 for h in today_records if h.get("status") == "ac")
     tokens = sum(h.get("tokens_in", 0) + h.get("tokens_out", 0) for h in today_records)
     cost = sum(h.get("cost", 0) for h in today_records)
@@ -484,6 +496,8 @@ def api_today():
 
 @app.route("/api/history")
 def api_history():
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
     d = _read_dashboard()
     n = request.args.get("n", 20, type=int)
     history = d.get("history", [])
@@ -506,22 +520,26 @@ def api_reload_prompts():
 @app.route("/kill", methods=["POST"])
 def kill_task():
     if not _check_auth(): return jsonify({"error": "未授权"}), 403
-    global active_proc, task_running
     with _state_lock:
         proc = active_proc
     if proc and proc.poll() is None:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, OSError):
+            if hasattr(os, 'killpg'):
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            else:
+                proc.kill()
+        except OSError:
             proc.kill()
-        with _state_lock: active_proc = None; task_running = False
-        emit("任务已被用户终止")
+        # 由工作线程回收子进程并释放任务槽，防止新任务被旧线程的清理覆盖。
+        emit("任务已收到终止信号")
         return jsonify({"ok": True})
     return jsonify({"error": "没有正在运行的任务"}), 400
 
 
 @app.route("/history")
 def get_history():
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
     with _state_lock:
         return jsonify(history[-20:])
 
@@ -533,10 +551,41 @@ def _check_auth() -> bool:
     return request.headers.get("X-Auth-Token", "") == AUTH_TOKEN
 
 
+@app.route("/stream/ticket", methods=["POST"])
+def stream_ticket():
+    """为 EventSource 签发短时票据，避免把长期 Token 放进 URL。"""
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
+    now = time.time()
+    ticket = secrets.token_urlsafe(24)
+    remote = request.remote_addr or ""
+    with _stream_lock:
+        for key in [k for k, (expires, _) in _stream_tickets.items() if expires <= now]:
+            _stream_tickets.pop(key, None)
+        _stream_tickets[ticket] = (now + STREAM_TICKET_TTL, remote)
+    return jsonify({"ticket": ticket, "expires_in": STREAM_TICKET_TTL})
+
+
+def _stream_auth() -> bool:
+    ticket = request.args.get("ticket", "")
+    if ticket:
+        now = time.time()
+        with _stream_lock:
+            entry = _stream_tickets.get(ticket)
+            if entry and entry[0] > now and entry[1] == (request.remote_addr or ""):
+                return True
+    return _check_auth()
+
+
 @app.route("/stream")
 def stream():
+    if not _stream_auth():
+        return jsonify({"error": "未授权"}), 403
+
     def gen():
         try:
+            # 立即发送握手，空闲时也能让浏览器确认连接已建立。
+            yield ":connected\n\n"
             while True:
                 batch = []
                 try:

@@ -270,7 +270,7 @@
   "usage_stats_enable": true,
   "_usage_stats_enable": "逐请求记录 token/费用/耗时到 usage.db；关闭后额度窗口统计也不可用",
   "usage_retention_days": 365,
-  "_usage_retention_days": "逐请求明细保留天数；可用 config_cli.py usage 查看",
+  "_usage_retention_days": "逐请求明细保留天数；AI 客户端每天最多自动清理一次，也可用 config_cli.py usage --prune 立即清理",
   "quotas": {
     "_comment": "订阅额度/账户余额（参照 cc-switch）。kind=window：按本地用量的 5h/daily/weekly/monthly 窗口额度（unit=cost/tokens/requests）。kind=balance：余额，source=manual/deepseek/stepfun/siliconflow/openrouter/novita/mimo/zhipu/newapi/sub2api/generic。kind=plan：供应商套餐额度（Token Plan/Coding Plan），source=kimi/zhipu_plan/minimax/opencode_go/ollama/mimo_plan。可用 config_cli.py quota 或 Web「用量与额度」查看。",
     "deepseek": {

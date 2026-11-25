@@ -21,6 +21,7 @@ import math
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -858,9 +859,32 @@ class QuotaManager:
                 log.warning("[额度] 忽略 %s: %s", qid, exc)
         return result
 
+    def _safe_status(self, defn: dict, now: float, refresh: bool) -> dict:
+        try:
+            return self._status_one(defn, now, refresh)
+        except Exception as exc:                       # 单个渠道异常不影响其他渠道
+            log.warning("[额度] %s 计算失败: %s", defn["id"], type(exc).__name__)
+            return {
+                "id": defn["id"], "kind": defn["kind"], "models": defn["models"],
+                "unit": ("percent" if defn["kind"] == "plan" else
+                         "currency" if defn["kind"] == "balance" else defn["unit"]),
+                "currency": defn["currency"], "low_threshold": defn["low_threshold"],
+                "remaining": None, "used": None, "limit": None, "ratio": None,
+                "window": None, "reset_at": None, "reset_in_s": None,
+                "source": defn["source"], "updated_at": now, "stale": False,
+                "note": defn["note"], "status": "error",
+                "error": f"额度计算失败（{type(exc).__name__}）",
+            }
+
     def status(self, *, refresh=False) -> list[dict]:
         now = time.time()
-        return [self._status_one(defn, now, refresh) for defn in self.definitions()]
+        definitions = self.definitions()
+        if len(definitions) <= 1:
+            return [self._safe_status(defn, now, refresh) for defn in definitions]
+        workers = min(8, len(definitions))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="quota") as pool:
+            return list(pool.map(lambda defn: self._safe_status(defn, now, refresh),
+                                 definitions))
 
     def summary(self, *, refresh=False) -> dict:
         items = self.status(refresh=refresh)

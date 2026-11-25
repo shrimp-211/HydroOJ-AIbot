@@ -5,7 +5,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from hydroai.config.paths import data_file
+from hydroai.config.paths import config_file
 
 from hydroai.config.io import atomic_write_json, read_config, validate_document
 from hydroai.config.manager import ConfigManager
@@ -201,7 +201,8 @@ def _print_usage(report):
 def _print_quota(report):
     items = report.get("items", [])
     if not items:
-        print("未配置额度。可在 config.json 的 quotas 段添加（见 config.example.json）。")
+        print("未配置额度。可在 config/config.json 的 quotas 段添加"
+              "（见 config/config.example.json）。")
         return
     print(f"💰 额度状态（{report['total']} 项，低余额/异常 {report['low']} 项）")
     for item in items:
@@ -248,7 +249,7 @@ def _print_quota(report):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default=str(data_file('config.json')), help='配置文件路径')
+    parser.add_argument('--config', default=str(config_file('config.json')), help='配置文件路径')
     commands = parser.add_subparsers(dest='command', required=True)
     init = commands.add_parser('init', help='创建单模型配置，不覆盖已有文件')
     init.add_argument('--model', required=True)
@@ -275,6 +276,8 @@ def main(argv=None):
     add.add_argument('--set-default', action='store_true', help='设为默认，并切换为该模型的单模型路由')
     usage = commands.add_parser('usage', help='查看逐请求 token/费用统计')
     usage.add_argument('--days', type=int, default=30, help='统计最近 N 天（默认 30）')
+    usage.add_argument('--prune', action='store_true',
+                       help='按 usage_retention_days 立即清理旧明细')
     usage.add_argument('--json', action='store_true')
     quota = commands.add_parser('quota', help='查看订阅额度与账户余额')
     quota.add_argument('--refresh', action='store_true', help='强制刷新远端余额，忽略缓存')
@@ -295,10 +298,18 @@ def main(argv=None):
             return 0
         if args.command == 'usage':
             report = usage_report(args.days)
+            if args.prune:
+                from hydroai.usage.store import get_store
+                retention = ConfigManager(args.config).usage_retention_days
+                report['pruned'] = get_store().prune(retention)
+                report['retention_days'] = retention
             if args.json:
                 print(json.dumps(report, ensure_ascii=False, indent=2))
             else:
                 _print_usage(report)
+                if args.prune:
+                    print(f"🧹 已清理 {report.get('pruned', 0)} 条早于 "
+                          f"{report.get('retention_days', 365)} 天的明细")
             return 0
         manager = ConfigManager(args.config)
         if args.command == 'models':

@@ -84,6 +84,17 @@ def test_prune_removes_old_rows(tmp_path):
     assert store.summary()["requests"] == 1
 
 
+def test_prune_if_due_is_throttled_by_meta(tmp_path):
+    store = _store(tmp_path)
+    old = time.time() - 10 * 86400
+    store.record(model="m", usage={"input": 1}, ts=old)
+    store.record(model="m", usage={"input": 1}, ts=time.time())
+    assert store.prune_if_due(retention_days=3, interval_hours=24) == 1
+    store.record(model="m", usage={"input": 1}, ts=old)
+    assert store.prune_if_due(retention_days=3, interval_hours=24) == 0
+    assert store.summary()["requests"] == 2
+
+
 def test_window_quota_uses_local_usage_and_reset(tmp_path):
     store = _store(tmp_path)
     now = time.time()
@@ -118,6 +129,18 @@ def test_window_quota_period_5h_and_request_unit(tmp_path):
     assert item["used"] == 3
     assert item["remaining"] == 7
     assert item["window"] == "5h"
+
+
+def test_multiple_quotas_keep_order_in_parallel(tmp_path, monkeypatch):
+    _mock_get(monkeypatch, {"balance": 1.0})
+    cfg = _manager(tmp_path, {
+        name: {"kind": "balance", "source": "stepfun", "api_key": "WALLET_KEY"}
+        for name in ("a", "b", "c")
+    })
+    monkeypatch.setenv("WALLET_KEY", "secret")
+    items = QuotaManager(cfg, store=_store(tmp_path)).status()
+    assert [item["id"] for item in items] == ["a", "b", "c"]
+    assert all(item["remaining"] == 1.0 for item in items)
 
 
 def test_manual_balance_low_threshold(tmp_path):

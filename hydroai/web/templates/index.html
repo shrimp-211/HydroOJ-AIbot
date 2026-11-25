@@ -1,711 +1,274 @@
 <!DOCTYPE html>
-<html lang="zh" data-mantine-color-scheme="dark">
+<html lang="zh-CN" data-api-root="{{ url_for('index') }}">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OJ Solver</title>
-<style>
-:root {
-  --bg: #1a1b2e; --panel: #222440; --border: #313458; --text: #d0d4f0;
-  --accent: #7b6cf6; --green: #4ecf8c; --red: #f0506e; --yellow: #f0cf50;
-  --radius: 8px; --font: 'Segoe UI', system-ui, sans-serif; --mono: 'Cascadia Code', 'Fira Code', monospace;
-}
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
-.header { background: var(--panel); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
-.header h1 { font-size: 20px; font-weight: 600; }
-.header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); }
-.header .dot.off { background: var(--border); }
-.tabs { display: flex; gap: 4px; margin-bottom: 24px; }
-.tab { padding: 8px 20px; border-radius: 6px 6px 0 0; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; color: #888; background: transparent; }
-.tab.active { color: var(--accent); border-color: var(--border); border-bottom-color: var(--panel); background: var(--panel); }
-.main { max-width: 1200px; margin: 0 auto; padding: 24px; }
-.main > div { display: none; }
-.main > div.active { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-@media (max-width: 800px) { .main > div.active { grid-template-columns: 1fr; } }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-.card h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: #b8bcf0; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
-.card h2 .expand { margin-left: auto; cursor: pointer; font-size: 18px; color: #888; }
-label { display: block; font-size: 12px; color: #888cb0; margin-bottom: 4px; margin-top: 10px; }
-input, select, textarea { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 6px; background: #1a1b2e; color: var(--text); font-size: 13px; font-family: var(--font); resize: vertical; }
-input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
-textarea { font-family: var(--mono); font-size: 12px; }
-.config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
-.config-grid .full { grid-column: 1 / -1; }
-.btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .15s; }
-.btn-primary { background: var(--accent); color: #fff; }
-.btn-primary:hover { filter: brightness(1.15); }
-.btn-green { background: var(--green); color: #111; }
-.btn-red { background: var(--red); color: #fff; }
-.btn-gray { background: #333; color: #aaa; }
-.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
-.btn-outline:hover { border-color: var(--accent); }
-.btn-group { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
-.console { background: #0d0e1a; border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; height: 500px; overflow-y: auto; font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-.console .dim { color: #555; }
-.console .warn { color: var(--yellow); }
-.console .err { color: var(--red); }
-.console .ok { color: var(--green); }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-.badge-on { background: #1a3a2a; color: var(--green); }
-.badge-off { background: #2a1a1a; color: #666; }
-.small { font-size: 12px; color: #888; }
-.mt8 { margin-top: 8px; }
-.msg { padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-top: 8px; display: none; }
-.msg-ok { background: #1a3a2a; color: var(--green); }
-.msg-err { background: #2a1a1a; color: var(--red); }
-.card.full { grid-column: 1 / -1; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-.tile { background: #1a1b2e; border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
-.tile .k { font-size: 11px; color: #888cb0; margin-bottom: 6px; }
-.tile .v { font-size: 19px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
-.tile .s { font-size: 11px; color: #6f7394; margin-top: 4px; }
-.chart { display: flex; align-items: flex-end; gap: 4px; height: 150px; padding-top: 10px; }
-.chart .bar { flex: 1; background: linear-gradient(180deg, #8f82ff, #5b4be0); border-radius: 3px 3px 0 0; min-height: 2px; }
-.chart .bar:hover { filter: brightness(1.35); }
-table.mono { width: 100%; border-collapse: collapse; font-size: 12px; }
-table.mono th, table.mono td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-table.mono th { color: #888cb0; font-weight: 600; position: sticky; top: 0; background: var(--panel); }
-table.mono td.num { text-align: right; font-variant-numeric: tabular-nums; }
-.progress { height: 6px; background: #121322; border-radius: 3px; overflow: hidden; margin-top: 7px; }
-.progress > i { display: block; height: 100%; background: var(--green); }
-.progress > i.warn { background: var(--yellow); }
-.progress > i.bad { background: var(--red); }
-.quota { border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; background: #1a1b2e; }
-.quota.low { border-color: var(--yellow); }
-.quota.error, .quota.stale { border-color: var(--red); }
-.quota .top { display: flex; align-items: baseline; gap: 8px; }
-.quota .name { font-weight: 700; color: #e2e4ff; }
-.quota .val { margin-left: auto; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.quota .meta { font-size: 11px; color: #7b7fa8; margin-top: 4px; }
-.tier { margin-top: 8px; }
-.tier .row { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: #9a9ec4; }
-.tier .row .pct { margin-left: auto; font-variant-numeric: tabular-nums; color: #d0d4f0; }
-.heatmap { display: grid; grid-template-rows: repeat(7, 12px); grid-auto-flow: column; grid-auto-columns: 12px; gap: 3px; overflow-x: auto; padding: 4px 0 8px; }
-.heatmap .cell { width: 12px; height: 12px; border-radius: 2px; background: #121322; }
-.heatmap .cell.l1 { background: #2b2a5c; }
-.heatmap .cell.l2 { background: #433e9e; }
-.heatmap .cell.l3 { background: #5b4be0; }
-.heatmap .cell.l4 { background: #8f82ff; }
-.heatmap-legend { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #7b7fa8; }
-.heatmap-legend i { width: 11px; height: 11px; border-radius: 2px; display: inline-block; background: #121322; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>求解工作台 · HydroAI</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='workspace.css') }}">
+  <script defer src="{{ url_for('static', filename='workspace.js') }}"></script>
 </head>
 <body>
+<a class="skip-link" href="#workspace">跳到工作区</a>
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m7 6-6 6 6 6m10-12 6 6-6 6m-3-15-4 18"/></symbol>
+  <symbol id="i-run" viewBox="0 0 24 24"><path d="M5 3.8 20 12 5 20.2Z"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v16h16m-12-4v-4m5 4V8m5 8V5"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16M8 4v4m8 2v4m-6 2v4"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><path d="M20.5 14.2A9 9 0 0 1 9.8 3.5a9 9 0 1 0 10.7 10.7Z"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5Zm9 9-9 5-9-5m18 4-9 5-9-5"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 6 6 6-6 6m9 0h7"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.6 7M3 5v6h6m3-4v5l3 2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2 6m2-12v6h-6"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+</svg>
+{% macro icon(name) -%}<svg class="icon" aria-hidden="true"><use href="#i-{{ name }}"/></svg>{%- endmacro %}
 
-<div class="header">
-  <div class="dot {{'off' if not daemon_running else ''}}" id="daemon-dot"></div>
-  <h1>OJ Solver</h1>
-  <span class="badge {{'badge-on' if daemon_running else 'badge-off'}}" id="daemon-badge">{{'守护运行中' if daemon_running else '守护已停止'}}</span>
-</div>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="主导航">
+    <div class="brand">
+      <span class="brand-mark">{{ icon('code') }}</span>
+      <div><div class="brand-name">Hydro<span>AI</span></div><div class="brand-caption">在线评测助手</div></div>
+    </div>
+    <div class="nav-caption">工作区</div>
+    <div class="nav-tabs" role="tablist" aria-label="工作区" aria-orientation="vertical">
+      <button type="button" role="tab" id="nav-solve" aria-controls="tab-solve" aria-selected="true">{{ icon('run') }} <span>求解工作台</span></button>
+      <button type="button" role="tab" id="nav-usage" aria-controls="tab-usage" aria-selected="false" tabindex="-1">{{ icon('chart') }} <span>用量与额度</span></button>
+      <button type="button" role="tab" id="nav-config" aria-controls="tab-config" aria-selected="false" tabindex="-1">{{ icon('sliders') }} <span>配置</span></button>
+    </div>
+    <div class="sidebar-footer"><span class="sidebar-footer-mark"></span> HydroAI Web Console</div>
+  </aside>
 
-<div class="tabs" style="max-width:1200px;margin:20px auto 0;padding:0 24px;">
-  <button class="tab active" onclick="switchTab('solve')">求解</button>
-  <button class="tab" onclick="switchTab('usage')">用量与额度</button>
-  <button class="tab" onclick="switchTab('config')">配置</button>
-</div>
-
-<div class="main">
-  <!-- ===== 求解面板 ===== -->
-  <div id="tab-solve" class="active">
-    <div>
-      <div class="card">
-        <h2>单个题目</h2>
-        <form onsubmit="solveSingle(event)">
-          <label>题目链接或 ID</label>
-          <input id="url" placeholder="https://oj.yuanyicode.com/p/1178 或 1178">
-          <div class="btn-group">
-            <button class="btn btn-primary" type="submit">求解并提交</button>
-            <button class="btn btn-outline" type="button" onclick="solveSingle(event, true)">仅生成题解</button>
-            <button class="btn btn-outline" type="button" onclick="dryRun()">仅抓取题目</button>
+  <main class="workspace" id="workspace" tabindex="-1">
+    <div class="topbar">
+      <div class="breadcrumb"><span>工作区</span><span aria-hidden="true">/</span><strong id="current-page">求解工作台</strong></div>
+      <div class="topbar-actions">
+        <span class="badge" id="daemon-badge" data-state="idle">正在检查守护状态</span>
+        <button type="button" id="theme-toggle" class="btn btn-icon" aria-label="深色主题" aria-pressed="false" title="切换深色主题">{{ icon('theme') }}</button>
+      </div>
+    </div>
+    <div class="content">
+      <!-- 求解面板 -->
+      <section id="tab-solve" role="tabpanel" aria-labelledby="nav-solve" tabindex="0">
+        <header class="page-hero">
+          <div class="hero-content">
+            <p class="eyebrow"><span aria-hidden="true"></span> OJ SOLVER</p>
+            <h1>求解工作台</h1>
+            <p>发起单题求解、处理比赛题目，或启动比赛守护。任务进度会显示在实时控制台中。</p>
+            <a class="console-shortcut" href="#console">{{ icon('terminal') }} 查看实时日志</a>
           </div>
-        </form>
-      </div>
-      <div class="card">
-        <h2>比赛批量</h2>
-        <form onsubmit="solveContest(event)">
-          <label>比赛 / 题目链接</label>
-          <input id="contest-url" placeholder="https://oj.yuanyicode.com/d/domain/contest/xxx">
-          <div class="btn-group">
-            <button class="btn btn-green" type="submit">批量求解</button>
-            <button class="btn btn-outline" type="button" onclick="solveContest(event, true)">仅生成题解</button>
+          <svg class="hero-art" viewBox="0 0 340 166" fill="none" aria-hidden="true">
+            <defs><pattern id="hero-grid" width="22" height="22" patternUnits="userSpaceOnUse"><path d="M22 0H0v22" stroke="#92b5ff" stroke-opacity=".17"/></pattern></defs>
+            <path d="M0 0h340v166H0z" fill="url(#hero-grid)"/>
+            <path d="M24 126h65l43-42h79l36-35h93M109 166l28-27h85l38-38h80" stroke="#8dbbff" stroke-opacity=".56"/>
+            <circle cx="132" cy="84" r="4" fill="#9dc5ff"/><circle cx="247" cy="49" r="4" fill="#9dc5ff"/><circle cx="260" cy="101" r="4" fill="#9dc5ff"/>
+            <rect x="161" y="28" width="73" height="50" rx="10" fill="#25478b" stroke="#759de8"/>
+            <path d="m176 45 8 8-8 8m16 0h21" stroke="#d1e3ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </header>
+
+        <div class="solve-grid">
+          <div class="stack" aria-label="任务操作">
+            <article class="card task-card">
+              <div class="card-heading"><span class="section-icon">{{ icon('code') }}</span><div><h2>单题求解</h2><p>输入题目链接，或使用默认 OJ 的题目 ID。</p></div></div>
+              <form id="single-form">
+                <label for="url">题目链接或 ID</label>
+                <input id="url" type="text" required maxlength="2000" placeholder="例如 1178 或完整题目链接" autocomplete="off" spellcheck="false">
+                <div class="btn-group">
+                  <button class="btn btn-primary" type="submit" name="mode" value="submit" data-task-start>{{ icon('run') }} 求解并提交</button>
+                  <button class="btn" type="submit" name="mode" value="no-submit" data-task-start>仅生成题解</button>
+                  <button class="btn btn-quiet" type="submit" name="mode" value="dry-run" data-task-start>仅抓取题目</button>
+                </div>
+              </form>
+            </article>
+            <article class="card task-card">
+              <div class="card-heading"><span class="section-icon">{{ icon('layers') }}</span><div><h2>比赛批量求解</h2><p>处理一场比赛中的题目，也可只生成题解。</p></div></div>
+              <form id="contest-form">
+                <label for="contest-url">比赛 / 题目链接</label>
+                <input id="contest-url" type="text" required maxlength="2000" placeholder="粘贴比赛或题目链接" autocomplete="off" spellcheck="false">
+                <div class="btn-group">
+                  <button class="btn btn-primary" type="submit" name="mode" value="submit" data-task-start>{{ icon('run') }} 批量求解</button>
+                  <button class="btn" type="submit" name="mode" value="no-submit" data-task-start>仅生成题解</button>
+                </div>
+              </form>
+            </article>
+            <article class="card task-card">
+              <div class="card-heading"><span class="section-icon">{{ icon('pulse') }}</span><div><h2>比赛守护</h2><p>定期检查已监测域名，为已结束的比赛生成题解。</p></div></div>
+              <div class="btn-group">
+                <button class="btn" type="button" id="btn-daemon-start">启动守护</button>
+                <button class="btn btn-danger" type="button" id="btn-daemon-stop" disabled>停止守护</button>
+                <button class="btn btn-quiet" type="button" id="btn-daemon-once" data-task-start>检查一次</button>
+              </div>
+            </article>
           </div>
-        </form>
-      </div>
-      <div class="card">
-        <h2>比赛守护</h2>
-        <p class="small">监控域名，自动为已结束的比赛编写题解。</p>
-        <div class="btn-group">
-          <button class="btn btn-green" id="btn-daemon-start" onclick="daemon('start')">启动守护</button>
-          <button class="btn btn-red" id="btn-daemon-stop" onclick="daemon('stop')" disabled>停止守护</button>
-          <button class="btn btn-outline" onclick="daemon('once')">仅检查一次</button>
-        </div>
-        <div class="small mt8" id="daemon-interval"></div>
-      </div>
-    </div>
-    <div class="card">
-      <h2>控制台 <span id="task-badge" class="badge badge-off" style="display:none">运行中</span></h2>
-      <div class="btn-group" style="margin-top:0;margin-bottom:10px;">
-        <button class="btn btn-red" id="btn-kill" onclick="killTask()" disabled>终止任务</button>
-        <button class="btn btn-outline" onclick="clearLog()">清屏</button>
-      </div>
-      <div class="console" id="console">等待操作...</div>
-    </div>
-    <div class="card">
-      <h2>最近记录</h2>
-      <div id="history" style="font-size:12px;color:#888;max-height:200px;overflow-y:auto;"></div>
-    </div>
-  </div>
 
-  <!-- ===== 配置面板 ===== -->
-  <div id="tab-config" style="grid-template-columns:1fr 1fr;">
-    <div class="card">
-      <h2>OJ 账户</h2>
-      <label>根地址</label><input id="cfg-oj-root">
-      <label>API 前缀</label><input id="cfg-oj-base">
-      <div class="config-grid">
-        <div><label>用户名</label><input id="cfg-oj-user"></div>
-        <div><label>密码</label><input id="cfg-oj-pass" type="password"></div>
-      </div>
-    </div>
-    <div class="card">
-      <h2>AI 模型</h2>
-      <label>API 地址</label><input id="cfg-ai-url" placeholder="https://api.deepseek.com">
-      <label>API Key（建议填 env:AI_API_KEY；留空保留）</label><input id="cfg-ai-key" type="password" autocomplete="new-password">
-      <div class="config-grid">
-        <div><label>模型</label><input id="cfg-ai-model"></div>
-        <div><label>推理强度</label>
-          <select id="cfg-ai-reasoning"><option value="">不指定</option>
-            <option value="low">low</option><option value="medium">medium</option>
-            <option value="high" selected>high</option><option value="max">max</option>
-          </select>
+          <div class="stack ops-stack">
+            <article class="card console-card">
+              <div class="card-heading console-heading"><span class="section-icon">{{ icon('terminal') }}</span><div><h2>实时控制台</h2><p>查看求解任务和比赛守护的输出。</p></div><span id="task-badge" class="badge" data-state="idle">正在检查任务状态</span></div>
+              <div class="console-frame">
+                <div class="console-toolbar">
+                  <span class="connection" id="stream-status" role="status" data-state="idle">连接中…</span>
+                  <div class="console-tools">
+                    <label class="check console-follow"><input id="log-follow" type="checkbox" checked> 跟随最新</label>
+                    <button type="button" id="copy-log" class="btn btn-terminal btn-icon" aria-label="复制日志" title="复制日志" disabled>{{ icon('copy') }}</button>
+                    <button type="button" id="clear-log" class="btn btn-terminal">清屏</button>
+                  </div>
+                </div>
+                <div class="console" id="console" tabindex="0" aria-label="日志输出"><p id="console-empty">暂无日志。启动任务后，输出会显示在这里。</p><div id="console-lines"></div></div>
+              </div>
+              <div class="console-footer"><p id="task-message" class="small" role="status">同一时间可运行一个前台任务。</p><button type="button" class="btn btn-danger" id="btn-kill" disabled>终止任务</button></div>
+            </article>
+            <article class="card history-card">
+              <div class="card-heading"><span class="section-icon">{{ icon('history') }}</span><div><h2>最近任务</h2><p>查看已结束的任务及退出状态。</p></div></div>
+              <div id="history" class="history"><p class="empty">正在读取任务记录…</p></div>
+            </article>
+          </div>
         </div>
-        <div><label>最大输出 Token</label><input id="cfg-ai-maxtok" type="number"></div>
-      </div>
-    </div>
-    <div class="card">
-      <h2>接入模型</h2>
-      <label>使用已保存的连接查询模型</label><select id="cfg-model-source"></select>
-      <button class="btn btn-outline mt8" onclick="discoverModels()">获取模型列表（不生成内容）</button>
-      <p class="small" id="cfg-model-discovery"></p>
-      <label>配置名称（自定义别名）</label><input id="new-model-name" placeholder="例如 fast-model">
-      <label>API 模型 ID</label><input id="new-model-id" list="remote-model-ids"><datalist id="remote-model-ids"></datalist>
-      <label>API 地址</label><input id="new-model-url" placeholder="https://your-api.example/v1">
-      <label>密钥环境变量名</label><input id="new-model-key-env" value="AI_API_KEY">
-      <p class="small">请先在运行环境中设置该变量；模型配置仅保存引用。</p>
-      <label>接口类型</label><select id="new-model-provider"><option value="compatible">OpenAI 兼容</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="zhipu">智谱</option></select>
-      <label>价格目录供应商 ID（代理服务需指定）</label><input id="new-model-price-provider" placeholder="例如 openai、deepseek、zhipuai">
-      <label><input id="new-model-default" type="checkbox" style="width:auto"> 设为默认，并切换为此模型的单模型路由</label>
-      <button class="btn btn-green mt8" onclick="addModel()">新增模型连接</button>
-    </div>
-    <div class="card">
-      <h2>自动定价</h2>
-      <label>USD → CNY（1 美元对应人民币；0 表示未设置）</label><input id="cfg-price-rate" type="number" min="0" step="0.0001">
-      <label>刷新间隔（小时）</label><input id="cfg-price-hours" type="number" min="1">
-      <label><input id="cfg-price-auto" type="checkbox" style="width:auto"> 运行时自动刷新价格目录</label>
-      <p class="small">手工价格优先。公共美元报价仅作估算；请维护汇率。先保存配置，再刷新目录。</p>
-      <div class="btn-group"><button class="btn btn-outline" onclick="showPrices(false)">查看价格</button><button class="btn btn-outline" onclick="showPrices(true)">刷新公共价格目录</button></div>
-      <pre id="cfg-prices" style="white-space:pre-wrap;font-size:12px"></pre>
-    </div>
-    <div class="card">
-      <h2>代码设置</h2>
-      <label>提交语言 ID</label><input id="cfg-code-lang" placeholder="cc.cc14o2">
-      <p class="small mt8">C++14: cc.cc14o2 | Python3: py.py3 | Java: java</p>
-    </div>
-    <div class="card">
-      <h2>监控守护</h2>
-      <label>监测域名（逗号分隔）</label><input id="cfg-mon-domains" placeholder="system, yuanyi__contestForPrimary">
-      <label>比赛列表起始页</label><input id="cfg-contest-page" type="number" min="1" value="2">
-      <label>检查间隔（秒）</label><input id="cfg-mon-interval" type="number">
-      <label>状态文件</label><input id="cfg-mon-state" placeholder="processed_contests.json">
-    </div>
-    <div class="card">
-      <h2>Token 与求解策略</h2>
-      <label>求解输出上限（包含推理 Token）</label><input id="cfg-solve-budget" type="number" min="1">
-      <label>方案输出上限</label><input id="cfg-plan-budget" type="number" min="1">
-      <label>题解输出上限</label><input id="cfg-editorial-budget" type="number" min="1">
-      <label><input id="cfg-detect" type="checkbox" style="width:auto"> 调用 AI 判断难度</label>
-      <label><input id="cfg-compact" type="checkbox" style="width:auto"> 精简修复历史（保留完整题面与当前代码）</label>
-      <p class="small mt8">模型独立设置会覆盖全局参数；预算与模型上限取较小值。</p>
-    </div>
-    <div class="card">
-      <h2>访问设置</h2>
-      <label>WebUI 访问令牌（--auth-token 或 WEBUI_AUTH_TOKEN）</label>
-      <input id="cfg-web-token" type="password" autocomplete="off" oninput="sessionStorage.setItem('oj-auth', this.value)">
-      <p class="small mt8">令牌只保存在当前浏览器会话。服务端环境变量优先于这里保存的配置。</p>
-      <pre id="cfg-diagnostics" style="white-space:pre-wrap;margin-top:12px"></pre>
-    </div>
-    <div class="card full" style="grid-column: 1 / -1;">
-      <div class="btn-group">
-        <button class="btn btn-primary" onclick="loadConfig()">刷新配置</button>
-        <button class="btn btn-green" onclick="saveConfig()">保存配置</button>
-        <button class="btn btn-outline" onclick="diagnoseConfig()">检查配置（不调用 AI）</button>
-        <span class="msg" id="cfg-msg"></span>
-      </div>
-    </div>
-  </div>
+      </section>
 
-  <!-- ===== 用量与额度 ===== -->
-  <div id="tab-usage">
-    <div class="card full">
-      <h2>用量概览 <span class="small" id="usage-range" style="margin-left:8px;text-transform:none">最近 30 天</span>
-        <span class="expand" title="刷新" onclick="loadUsage(true)">⟳</span></h2>
-      <div class="tiles" id="usage-tiles"></div>
-      <div class="small mt8" id="usage-note"></div>
+      <!-- 用量面板 -->
+      <section id="tab-usage" role="tabpanel" aria-labelledby="nav-usage" tabindex="0" hidden>
+        <header class="page-heading">
+          <div><p class="eyebrow">AI USAGE</p><h1>用量与额度</h1><p>查看模型调用、预估费用和各供应商的剩余额度。</p></div>
+          <div class="heading-tools"><label for="usage-days" class="sr-only">统计时间范围</label><select id="usage-days"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option></select><button type="button" class="btn" id="usage-refresh">{{ icon('refresh') }} 刷新用量</button></div>
+        </header>
+        <p id="usage-status" class="page-status" role="status" hidden></p>
+        <div class="detail-grid">
+          <article class="card full">
+            <div class="card-heading"><div><h2>用量概览</h2><p>费用根据已配置或可识别的定价估算。</p></div></div>
+            <div class="tiles" id="usage-tiles"><p class="empty">正在读取用量…</p></div>
+            <p class="small usage-note" id="usage-note" hidden></p>
+          </article>
+          <article class="card full">
+            <div class="card-heading"><div><h2>每日 Token 用量</h2><p>输入和输出 Token 合计。</p></div></div>
+            <div id="usage-chart"><p class="empty">正在读取用量趋势…</p></div>
+          </article>
+          <article class="card">
+            <div class="card-heading"><div><h2>额度与余额</h2><p>刷新余额可能向供应商发起查询。</p></div><button type="button" class="btn" id="quota-refresh">刷新余额</button></div>
+            <div id="quota-list"><p class="empty">正在读取额度…</p></div>
+          </article>
+          <article class="card">
+            <div class="card-heading"><div><h2>用量分布</h2><p>按维度比较模型调用。</p></div><label for="usage-breakdown-by" class="sr-only">统计维度</label><select id="usage-breakdown-by"><option value="model">按模型</option><option value="provider">按供应商</option><option value="task">按任务</option></select></div>
+            <div id="usage-models" class="table-wrap" tabindex="0" role="region" aria-label="用量分布表"><p class="empty">正在读取用量分布…</p></div>
+          </article>
+          <article class="card full">
+            <div class="card-heading"><div><h2>请求热力图</h2><p>最近 365 天，不受上方时间范围影响。</p></div></div>
+            <div id="usage-calendar"><p class="empty">正在读取年度请求…</p></div>
+          </article>
+          <article class="card full">
+            <div class="card-heading"><div><h2>最近请求</h2><p>按时间倒序，最多显示 30 条。</p></div></div>
+            <div id="usage-recent" class="table-wrap recent-table" tabindex="0" role="region" aria-label="最近请求表"><p class="empty">正在读取请求记录…</p></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- 配置面板 -->
+      <section id="tab-config" role="tabpanel" aria-labelledby="nav-config" tabindex="0" hidden>
+        <header class="page-heading"><div><p class="eyebrow">SETTINGS</p><h1>配置</h1><p>管理 OJ 账户、模型连接及求解策略。</p></div></header>
+        <div class="detail-grid">
+          <form class="card full access-card" id="access-form">
+            <div class="card-heading"><div><h2>网页访问令牌</h2><p id="access-help">仅在服务器要求验证时填写。令牌保存在当前浏览器会话，不写入服务器配置。</p></div></div>
+            <div class="inline-form"><div><label for="cfg-web-token">访问令牌</label><input id="cfg-web-token" type="password" autocomplete="off" aria-describedby="access-help"></div><button type="submit" class="btn">应用令牌</button></div>
+          </form>
+
+          <form id="config-form" class="full stack">
+            <div class="config-toolbar" aria-label="配置操作">
+              <div><strong id="config-state">尚未载入</strong><p id="cfg-msg" class="small" role="status" hidden></p></div>
+              <div class="btn-group"><button class="btn" id="cfg-reload" type="button">{{ icon('refresh') }} 重新载入</button><button class="btn" id="cfg-diagnose" type="button">检查配置</button><button class="btn btn-primary" id="cfg-save" type="submit" disabled>保存配置</button></div>
+            </div>
+            <pre id="cfg-diagnostics" class="result" role="status" hidden></pre>
+            <fieldset id="config-fields" class="detail-grid" disabled>
+              <legend class="sr-only">基本配置</legend>
+              <article class="card">
+                <div class="card-heading"><div><h2>OJ 账户</h2><p>题目查询和提交使用的评测站点。</p></div></div>
+                <div class="fields">
+                  <div class="full"><label for="cfg-oj-root">根地址</label><input id="cfg-oj-root" placeholder="https://oj.example" spellcheck="false"></div>
+                  <div class="full"><label for="cfg-oj-base">API 前缀</label><input id="cfg-oj-base" spellcheck="false"></div>
+                  <div><label for="cfg-oj-user">用户名</label><input id="cfg-oj-user" autocomplete="off"></div>
+                  <div><label for="cfg-oj-pass">密码</label><input id="cfg-oj-pass" type="password" autocomplete="new-password"></div>
+                </div>
+              </article>
+              <article class="card">
+                <div class="card-heading"><div><h2>默认模型</h2><p>模型连接和生成参数。</p></div></div>
+                <div class="fields">
+                  <div class="full"><label for="cfg-ai-url">API 地址</label><input id="cfg-ai-url" placeholder="https://api.deepseek.com" spellcheck="false"></div>
+                  <div class="full"><label for="cfg-ai-key">API Key <span class="small">（建议填 env:AI_API_KEY）</span></label><input id="cfg-ai-key" type="password" autocomplete="new-password"></div>
+                  <div class="full"><label for="cfg-ai-model">模型</label><input id="cfg-ai-model" spellcheck="false"></div>
+                  <div><label for="cfg-ai-reasoning">推理强度</label><select id="cfg-ai-reasoning"><option value="">不指定</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="max">max</option></select></div>
+                  <div><label for="cfg-ai-maxtok">最大输出 Token</label><input id="cfg-ai-maxtok" type="number" min="1"></div>
+                </div>
+              </article>
+              <article class="card">
+                <div class="card-heading"><div><h2>求解策略</h2><p>任务预算与模型输出上限取较小值。</p></div></div>
+                <div class="fields">
+                  <div class="full"><label for="cfg-code-lang">提交语言 ID</label><input id="cfg-code-lang" placeholder="cc.cc14o2" spellcheck="false"><p class="small field-help">C++14：cc.cc14o2 · Python3：py.py3 · Java：java</p></div>
+                  <div class="full"><label for="cfg-solve-budget">求解输出上限（包含推理 Token）</label><input id="cfg-solve-budget" type="number" min="1"></div>
+                  <div><label for="cfg-plan-budget">方案输出上限</label><input id="cfg-plan-budget" type="number" min="1"></div>
+                  <div><label for="cfg-editorial-budget">题解输出上限</label><input id="cfg-editorial-budget" type="number" min="1"></div>
+                  <label class="check full" for="cfg-detect"><input id="cfg-detect" type="checkbox">调用 AI 判断难度</label>
+                  <label class="check full" for="cfg-compact"><input id="cfg-compact" type="checkbox">精简修复历史（保留完整题面与当前代码）</label>
+                </div>
+              </article>
+              <article class="card">
+                <div class="card-heading"><div><h2>比赛守护</h2><p>设置监测范围和检查频率。</p></div></div>
+                <div class="fields">
+                  <div class="full"><label for="cfg-mon-domains">监测域名（逗号分隔）</label><input id="cfg-mon-domains" placeholder="例如 system, contest" spellcheck="false"></div>
+                  <div><label for="cfg-contest-page">列表起始页</label><input id="cfg-contest-page" type="number" min="1"></div>
+                  <div><label for="cfg-mon-interval">检查间隔（秒）</label><input id="cfg-mon-interval" type="number" min="1"></div>
+                  <div class="full"><label for="cfg-mon-state">状态文件</label><input id="cfg-mon-state" placeholder="processed_contests.json" spellcheck="false"></div>
+                </div>
+              </article>
+              <article class="card full">
+                <div class="card-heading"><div><h2>自动定价</h2><p>手工价格优先，公共美元报价仅作估算。请先保存汇率，再刷新价格目录。</p></div></div>
+                <div class="fields">
+                  <div><label for="cfg-price-rate">USD → CNY（0 表示未设置）</label><input id="cfg-price-rate" type="number" min="0" step="0.0001"></div>
+                  <div><label for="cfg-price-hours">刷新间隔（小时）</label><input id="cfg-price-hours" type="number" min="1"></div>
+                  <label class="check full" for="cfg-price-auto"><input id="cfg-price-auto" type="checkbox">运行时自动刷新价格目录</label>
+                </div>
+                <div class="btn-group"><button class="btn" type="button" id="price-show">查看价格</button><button class="btn" type="button" id="price-refresh">刷新公共价格目录</button></div>
+                <pre id="cfg-prices" class="result" role="status" hidden></pre>
+              </article>
+            </fieldset>
+          </form>
+
+          <details class="card full disclosure">
+            <summary><span><strong>接入模型</strong><small>查询已保存的连接，或新增一个模型别名。</small></span>{{ icon('chevron') }}</summary>
+            <div class="disclosure-body">
+              <div class="inline-form"><div><label for="cfg-model-source">已保存的连接</label><select id="cfg-model-source" disabled><option value="">请先载入配置</option></select></div><button class="btn" type="button" id="model-discover" disabled>查询模型列表</button></div>
+              <p class="small field-help" id="cfg-model-discovery" role="status">查询列表不会生成内容。</p>
+              <form id="model-form">
+                <div class="fields">
+                  <div><label for="new-model-name">配置名称</label><input id="new-model-name" placeholder="例如 fast-model" required></div>
+                  <div><label for="new-model-id">API 模型 ID</label><input id="new-model-id" list="remote-model-ids" required><datalist id="remote-model-ids"></datalist></div>
+                  <div><label for="new-model-url">API 地址</label><input id="new-model-url" placeholder="https://your-api.example/v1" spellcheck="false" required></div>
+                  <div><label for="new-model-key-env">密钥环境变量名</label><input id="new-model-key-env" value="AI_API_KEY" aria-describedby="model-key-help"><p id="model-key-help" class="small field-help">请先在运行环境中设置该变量；只保存引用。</p></div>
+                  <div><label for="new-model-provider">接口类型</label><select id="new-model-provider"><option value="compatible">OpenAI 兼容</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="zhipu">智谱</option></select></div>
+                  <div><label for="new-model-price-provider">价格目录供应商 ID</label><input id="new-model-price-provider" placeholder="例如 openai、deepseek、zhipuai"><p class="small field-help">代理服务需指定。</p></div>
+                  <label class="check full" for="new-model-default"><input id="new-model-default" type="checkbox">设为默认，并切换为此模型的单模型路由</label>
+                </div>
+                <div class="btn-group"><button class="btn btn-primary" type="submit" id="model-add">新增模型连接</button></div>
+                <p id="model-message" class="page-status" role="status" hidden></p>
+              </form>
+            </div>
+          </details>
+
+          <details class="card full disclosure">
+            <summary><span><strong>高级配置（JSON）</strong><small>编辑完整配置，包括模型路由与额度。</small></span>{{ icon('chevron') }}</summary>
+            <div class="disclosure-body">
+              <label for="cfg-advanced-json">配置 JSON</label>
+              <p id="advanced-help" class="small field-help">密钥不会回显。省略密钥字段会保留原值，设为 null 可清空；建议使用 env:NAME。保存时会忽略 *_configured 标记。</p>
+              <textarea id="cfg-advanced-json" rows="14" spellcheck="false" aria-describedby="advanced-help" placeholder="载入安全配置，或粘贴 JSON。"></textarea>
+              <div class="btn-group"><button type="button" class="btn" id="advanced-load">载入安全配置</button><button type="button" class="btn btn-primary" id="advanced-save">保存高级配置</button></div>
+              <p id="cfg-advanced-msg" class="page-status" role="status" hidden></p>
+            </div>
+          </details>
+        </div>
+      </section>
     </div>
-    <div class="card">
-      <h2>额度与余额</h2>
-      <div id="quota-list"><span class="small">加载中…</span></div>
-      <div class="btn-group">
-        <button class="btn btn-outline" onclick="refreshQuota()">刷新余额</button>
-      </div>
-      <p class="small mt8">窗口额度按本地逐请求用量计算；余额可来自手工配置或供应商接口。详见 config.example.json 的 quotas 段。</p>
-    </div>
-    <div class="card">
-      <h2>按模型</h2>
-      <div id="usage-models" style="overflow-x:auto"></div>
-    </div>
-    <div class="card full">
-      <h2>每日 Token 趋势</h2>
-      <div class="chart" id="usage-chart"></div>
-      <div class="small" id="usage-chart-range" style="margin-top:6px"></div>
-    </div>
-    <div class="card full">
-      <h2>全年热力图 <span class="small" style="margin-left:8px;text-transform:none">最近 365 天请求数</span></h2>
-      <div class="heatmap" id="usage-calendar"></div>
-      <div class="heatmap-legend">少 <i></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i> 多</div>
-    </div>
-    <div class="card full">
-      <h2>最近请求</h2>
-      <div id="usage-recent" style="overflow:auto;max-height:380px"></div>
-    </div>
-  </div>
+  </main>
 </div>
-
-<script>
-function apiFetch(path, options = {}) {
-  return fetch(path, {...options, headers: {...(options.headers || {}), 'X-Auth-Token': sessionStorage.getItem('oj-auth') || ''}});
-}
-document.getElementById('cfg-web-token').value = sessionStorage.getItem('oj-auth') || '';
-const con = document.getElementById('console');
-const evtSource = new EventSource('/stream');
-evtSource.onmessage = function(e) {
-  let html = '';
-  for (const line of JSON.parse(e.data)) {
-    const span = document.createElement('span');
-    span.textContent = line + '\n';
-    if (line.includes('[-]') || line.includes('ERROR')) span.className = 'err';
-    else if (line.includes('[+]') || line.includes('成功') || line.includes('AC')) span.className = 'ok';
-    con.appendChild(span);
-  }
-  con.scrollTop = con.scrollHeight;
-};
-
-function post(path, body) {
-  return apiFetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }).then(r => r.json());
-}
-
-function solveSingle(e, noSubmit) {
-  e.preventDefault();
-  const url = document.getElementById('url').value.trim();
-  if (!url) return;
-  const args = [url];
-  if (noSubmit) args.push('--no-submit');
-  post('/run/oj_solver', {args});
-}
-
-function dryRun() {
-  const url = document.getElementById('url').value.trim();
-  if (!url) return;
-  post('/run/oj_solver', {args: [url, '--dry-run']});
-}
-
-function solveContest(e, noSubmit) {
-  e.preventDefault();
-  const url = document.getElementById('contest-url').value.trim();
-  if (!url) return;
-  const args = [url];
-  if (noSubmit) args.push('--no-submit');
-  post('/run/contest_solver', {args});
-}
-
-function daemon(action) {
-  post('/daemon/' + action, {});
-  setTimeout(updateDaemonStatus, 1000);
-}
-
-function updateDaemonStatus() {
-  apiFetch('/status').then(r => r.json()).then(s => {
-    const on = s.daemon_running;
-    document.getElementById('daemon-dot').className = 'dot' + (on ? '' : ' off');
-    document.getElementById('daemon-badge').textContent = on ? '守护运行中' : '守护已停止';
-    document.getElementById('daemon-badge').className = 'badge ' + (on ? 'badge-on' : 'badge-off');
-    document.getElementById('btn-daemon-start').disabled = on;
-    document.getElementById('btn-daemon-stop').disabled = !on;
-    // 任务状态
-    const tr = s.task_running;
-    const badge = document.getElementById('task-badge');
-    badge.style.display = tr ? 'inline-block' : 'none';
-    badge.className = 'badge ' + (tr ? 'badge-on' : 'badge-off');
-    document.getElementById('btn-kill').disabled = !tr;
-  });
-  // 刷新历史
-  apiFetch('/history').then(r => r.json()).then(items => {
-    const h = document.getElementById('history');
-    h.textContent = '';
-    if (items.length) {
-      for (const i of items.reverse()) {
-        const div = document.createElement('div');
-        div.style.cssText = 'margin:2px 0;font-family:monospace';
-        div.textContent = `[${i.time}] ${i.cmd.substring(0,60)}... → ${i.code===0?'OK':i.code}`;
-        h.appendChild(div);
-      }
-    } else {
-      h.textContent = '暂无记录';
-    }
-  });
-  if (document.getElementById('tab-usage').classList.contains('active')
-      && Date.now() - usageLoadedAt > 30000) {
-    loadUsage();
-  }
-}
-
-function killTask() {
-  apiFetch('/kill', {method:'POST'});
-}
-
-function clearLog() {
-  document.getElementById('console').innerHTML = '';
-  apiFetch('/clear', {method:'POST'});
-}
-
-function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab[onclick*="'+name+'"]').forEach(t => t.classList.add('active'));
-  document.querySelectorAll('.main > div').forEach(d => d.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  if (name === 'config') loadConfig();
-  if (name === 'usage') loadUsage();
-}
-
-function showMsg(text, ok) {
-  const m = document.getElementById('cfg-msg');
-  m.textContent = text; m.className = 'msg ' + (ok ? 'msg-ok' : 'msg-err');
-  m.style.display = 'block';
-  setTimeout(() => m.style.display = 'none', 3000);
-}
-
-async function loadConfig() {
-  try {
-    const r = await apiFetch('/config');
-    const c = await r.json();
-    if (!r.ok) throw new Error(c.error || '读取失败');
-    const fields = {'oj-root':'oj_root', 'oj-base':'oj_base', 'oj-user':'username',
-      'ai-url':'ai_base_url', 'ai-model':'ai_model', 'ai-reasoning':'ai_reasoning_effort',
-      'ai-maxtok':'ai_max_tokens', 'code-lang':'code_lang', 'mon-interval':'monitor_interval',
-      'mon-state':'monitor_state_file', 'contest-page':'contest_start_page'};
-    for (const [id, key] of Object.entries(fields)) document.getElementById('cfg-'+id).value = c[key] ?? '';
-    for (const [id, configured] of [['ai-key', c.ai_api_key_configured], ['oj-pass', c.password_configured]]) {
-      const input = document.getElementById('cfg-'+id);
-      input.value = '';
-      input.placeholder = configured ? '已配置，留空保留' : '尚未配置';
-    }
-    document.getElementById('cfg-mon-domains').value = (c.monitor_domains || []).join(', ');
-    document.getElementById('cfg-solve-budget').value = c.ai_task_tokens?.solve ?? 16384;
-    document.getElementById('cfg-plan-budget').value = c.ai_task_tokens?.plan ?? 4096;
-    document.getElementById('cfg-editorial-budget').value = c.ai_task_tokens?.editorial ?? 8192;
-    document.getElementById('cfg-detect').checked = c.difficulty_detect_enable;
-    document.getElementById('cfg-compact').checked = c.compact_history;
-    document.getElementById('cfg-price-rate').value = c.pricing_usd_to_cny ?? 0;
-    document.getElementById('cfg-price-hours').value = c.pricing_refresh_hours ?? 6;
-    document.getElementById('cfg-price-auto').checked = c.pricing_auto_update ?? true;
-    const source = document.getElementById('cfg-model-source');
-    source.replaceChildren();
-    for (const name of new Set([c.ai_model, ...Object.keys(c.models || {}).filter(n => !n.startsWith('_'))])) {
-      const option = document.createElement('option'); option.value = name; option.textContent = name; source.append(option);
-    }
-  } catch (error) { showMsg(error.message, false); }
-}
-
-async function saveConfig() {
-  const value = id => document.getElementById('cfg-'+id).value.trim();
-  const payload = {
-    oj_root:value('oj-root'), oj_base:value('oj-base'), username:value('oj-user'),
-    ai_base_url:value('ai-url'), ai_model:value('ai-model'), ai_reasoning_effort:value('ai-reasoning'),
-    ai_max_tokens:Number(value('ai-maxtok')), code_lang:value('code-lang'),
-    monitor_domains:value('mon-domains').split(',').map(s=>s.trim()).filter(Boolean),
-    contest_start_page:Number(value('contest-page')), monitor_interval:Number(value('mon-interval')), monitor_state_file:value('mon-state'),
-    ai_task_tokens:{solve:Number(value('solve-budget')), plan:Number(value('plan-budget')), editorial:Number(value('editorial-budget'))},
-    difficulty_detect_enable:document.getElementById('cfg-detect').checked,
-    compact_history:document.getElementById('cfg-compact').checked,
-    pricing_usd_to_cny:Number(value('price-rate')), pricing_refresh_hours:Number(value('price-hours')),
-    pricing_auto_update:document.getElementById('cfg-price-auto').checked
-  };
-  if (value('ai-key')) payload.ai_api_key = value('ai-key');
-  if (document.getElementById('cfg-oj-pass').value) payload.password = document.getElementById('cfg-oj-pass').value;
-  try {
-    const r = await apiFetch('/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-    const result = await r.json();
-    if (!r.ok) throw new Error((result.errors || [result.error || '保存失败']).join('；'));
-    showMsg('配置已保存', true);
-    await loadConfig();
-  } catch (error) { showMsg(error.message, false); }
-}
-
-async function diagnoseConfig() {
-  const box = document.getElementById('cfg-diagnostics');
-  try {
-    const r = await apiFetch('/config/doctor');
-    const result = await r.json();
-    if (!r.ok) throw new Error(result.error || '检查失败');
-    box.textContent = [result.ok ? '检查通过' : '请修正以下问题', ...result.errors, ...result.warnings,
-      ...result.models.map(m => `${m.name}: ${m.provider}，输出上限 ${m.output_limit ?? '?'}`)].join('\n');
-  } catch (error) { box.textContent = error.message; }
-}
-
-async function discoverModels() {
-  const box = document.getElementById('cfg-model-discovery');
-  box.textContent = '正在查询已保存连接…';
-  try {
-    const r = await apiFetch('/models/discover', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:document.getElementById('cfg-model-source').value})});
-    const data = await r.json(); if (!r.ok) throw new Error(data.error);
-    const list = document.getElementById('remote-model-ids'); list.replaceChildren();
-    for (const row of data.models) {const option = document.createElement('option'); option.value = row.id; list.append(option);}
-    document.getElementById('new-model-url').value = data.base_url;
-    box.textContent = `找到 ${data.models.length} 个模型。在 API 模型 ID 中选择；可用列表不代表每个模型都支持 Chat Completions。`;
-  } catch (error) {box.textContent = error.message;}
-}
-
-async function addModel() {
-  const value = id => document.getElementById('new-model-'+id).value.trim();
-  try {
-    const r = await apiFetch('/models/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
-      name:value('name'), model_id:value('id'), base_url:value('url'), api_key_env:value('key-env'),
-      provider:value('provider'), pricing_provider:value('price-provider'), set_default:document.getElementById('new-model-default').checked})});
-    const data = await r.json(); if (!r.ok) throw new Error(data.error);
-    showMsg('模型连接已保存', true); await loadConfig();
-  } catch (error) {showMsg(error.message, false);}
-}
-
-async function showPrices(refresh) {
-  const box = document.getElementById('cfg-prices'); box.textContent = refresh ? '正在刷新公共价格目录…' : '正在读取缓存…';
-  try {
-    const r = await apiFetch(refresh ? '/pricing/refresh' : '/pricing', {method:refresh ? 'POST' : 'GET'});
-    const data = await r.json(); if (!r.ok) throw new Error(data.error);
-    box.textContent = [`目录：${data.count} 项${data.stale ? '（无缓存或已过期）' : ''}`, data.error || '', ...data.models.map(m =>
-      m.known ? `${m.name}: ¥${m.pricing.input ?? 0} 输入 / ¥${m.pricing.output ?? 0} 输出（百万 token，${m.source === 'manual' ? '手工' : '自动'}）` : `${m.name}: ${m.reason}`)].filter(Boolean).join('\n');
-  } catch (error) {box.textContent = error.message;}
-}
-
-// ── 用量与额度 ──
-let usageLoadedAt = 0;
-
-function esc(value) {
-  return String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g,
-    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function fmtNum(n) {
-  n = Number(n || 0);
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(Math.round(n));
-}
-function fmtCost(n) { return '¥' + Number(n || 0).toFixed(4); }
-function fmtPct(x) { return (Number(x || 0) * 100).toFixed(1) + '%'; }
-function fmtDuration(sec) {
-  if (sec === null || sec === undefined) return '—';
-  sec = Math.max(0, Math.floor(sec));
-  const days = Math.floor(sec / 86400); sec %= 86400;
-  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
-  return (days ? days + 'd ' : '') + (h || days ? String(h).padStart(2, '0') + ':' : '')
-    + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
-}
-
-function renderUsageTiles(s, t) {
-  const items = [
-    ['请求数', fmtNum(s.requests), '今日 ' + fmtNum(t.requests)],
-    ['输入 Token', fmtNum(s.input_tokens), '今日 ' + fmtNum(t.input_tokens)],
-    ['输出 Token', fmtNum(s.output_tokens), '今日 ' + fmtNum(t.output_tokens)],
-    ['缓存命中率', fmtPct(s.cache_rate), '缓存 ' + fmtNum(s.cache_hit_tokens) + ' token'],
-    ['预估费用', fmtCost(s.cost), '今日 ' + fmtCost(t.cost)],
-    ['平均输出速度', (s.avg_output_speed || 0).toFixed(1) + ' tok/s', '平均延迟 ' + (s.avg_latency_s || 0).toFixed(1) + 's'],
-  ];
-  document.getElementById('usage-tiles').innerHTML = items.map(([k, v, sub]) =>
-    '<div class="tile"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div><div class="s">' + esc(sub) + '</div></div>').join('');
-  const note = document.getElementById('usage-note');
-  if (s.requests > s.priced_requests) {
-    note.textContent = '⚠️ ' + (s.requests - s.priced_requests) + ' 次请求缺少定价，费用可能被低估；请在配置中补充 pricing。';
-  } else if (s.failed_requests) {
-    note.textContent = '失败请求：' + s.failed_requests + ' 次（计入请求数，不含 token）。';
-  } else {
-    note.textContent = '';
-  }
-}
-
-function renderUsageChart(series) {
-  const chart = document.getElementById('usage-chart');
-  const range = document.getElementById('usage-chart-range');
-  if (!series.length) { chart.innerHTML = '<span class="small">暂无数据</span>'; range.textContent = ''; return; }
-  const max = Math.max(...series.map(d => d.total_tokens), 1);
-  chart.innerHTML = series.map(d => {
-    const height = Math.max(2, Math.round(d.total_tokens / max * 100));
-    const tip = d.day + ' · ' + fmtNum(d.total_tokens) + ' token · ' + fmtCost(d.cost);
-    return '<div class="bar" style="height:' + height + '%" title="' + esc(tip) + '"></div>';
-  }).join('');
-  range.textContent = series[0].day + ' → ' + series[series.length - 1].day;
-}
-
-function renderCalendar(series) {
-  const el = document.getElementById('usage-calendar');
-  if (!series.length) { el.innerHTML = '<span class="small">暂无数据</span>'; return; }
-  const max = Math.max(...series.map(d => d.requests), 1);
-  const first = new Date(series[0].day + 'T00:00:00');
-  const offset = Number.isNaN(first.getTime()) ? 0 : first.getDay();
-  let html = '';
-  for (let i = 0; i < offset; i++) html += '<div class="cell" style="visibility:hidden"></div>';
-  for (const d of series) {
-    const level = d.requests === 0 ? 0 : Math.min(4, 1 + Math.floor(d.requests / max * 3.999));
-    const tip = d.day + ' · ' + fmtNum(d.requests) + ' 次 · ' + fmtNum(d.total_tokens) + ' token';
-    html += '<div class="cell l' + level + '" title="' + esc(tip) + '"></div>';
-  }
-  el.innerHTML = html;
-}
-
-function renderUsageModels(rows) {
-  const el = document.getElementById('usage-models');
-  if (!rows.length) { el.innerHTML = '<span class="small">暂无数据</span>'; return; }
-  let html = '<table class="mono"><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>缓存命中</th><th>费用</th><th>tok/s</th></tr></thead><tbody>';
-  for (const r of rows) {
-    html += '<tr><td>' + esc(r.key || '(未知)') + '</td>'
-      + '<td class="num">' + fmtNum(r.requests) + '</td>'
-      + '<td class="num">' + fmtNum(r.input_tokens) + '</td>'
-      + '<td class="num">' + fmtNum(r.output_tokens) + '</td>'
-      + '<td class="num">' + fmtPct(r.cache_rate) + '</td>'
-      + '<td class="num">' + fmtCost(r.cost) + '</td>'
-      + '<td class="num">' + (r.avg_output_speed || 0).toFixed(1) + '</td></tr>';
-  }
-  el.innerHTML = html + '</tbody></table>';
-}
-
-function renderUsageRecent(rows) {
-  const el = document.getElementById('usage-recent');
-  if (!rows.length) { el.innerHTML = '<span class="small">暂无请求记录</span>'; return; }
-  let html = '<table class="mono"><thead><tr><th>时间</th><th>模型</th><th>任务</th><th>题目</th><th>输入</th><th>输出</th><th>缓存</th><th>费用</th><th>tok/s</th><th>状态</th></tr></thead><tbody>';
-  for (const r of rows) {
-    html += '<tr><td>' + esc(r.time) + '</td>'
-      + '<td>' + esc(r.model) + '</td>'
-      + '<td>' + esc(r.task) + '</td>'
-      + '<td>' + esc(r.problem_id) + '</td>'
-      + '<td class="num">' + fmtNum(r.input_tokens) + '</td>'
-      + '<td class="num">' + fmtNum(r.output_tokens) + '</td>'
-      + '<td class="num">' + fmtNum(r.cache_hit_tokens) + '</td>'
-      + '<td class="num">' + (r.cost_known ? fmtCost(r.cost) : '未知') + '</td>'
-      + '<td class="num">' + Number(r.output_speed || 0).toFixed(1) + '</td>'
-      + '<td>' + (r.ok ? '✅' : '❌') + '</td></tr>';
-  }
-  el.innerHTML = html + '</tbody></table>';
-}
-
-function renderQuota(data) {
-  const el = document.getElementById('quota-list');
-  const items = (data && data.items) || [];
-  if (!items.length) {
-    el.innerHTML = '<span class="small">未配置额度。' + esc((data && data.error) || '') + '</span>';
-    return;
-  }
-  el.innerHTML = items.map(item => {
-    const cls = ['quota'];
-    if (item.status === 'low') cls.push('low');
-    if (item.status === 'error') cls.push('error');
-    if (item.status === 'stale') cls.push('stale');
-    let value = '', meta = '', width = 0;
-    if (item.kind === 'plan' || item.unit === 'percent') {
-      value = (item.remaining === null || item.remaining === undefined)
-        ? '不可用' : '剩余 ' + Number(item.remaining).toFixed(1) + '%';
-      meta = item.plan_name || '';
-      if (item.source) meta += (meta ? ' · ' : '') + item.source;
-      if (item.error) meta += (meta ? ' · ' : '') + item.error;
-      const tiers = (item.tiers || []).map(tier => {
-        const label = {five_hour: '5 小时', weekly: '每周', monthly: '每月', credits: '额度'}[tier.name] || tier.name;
-        const tierCls = tier.status === 'low' ? 'warn' : '';
-        const reset = (tier.reset_in_s !== null && tier.reset_in_s !== undefined)
-          ? '重置 ' + fmtDuration(tier.reset_in_s) : '';
-        return '<div class="tier"><div class="row"><span>' + esc(label)
-          + '</span><span class="pct">剩余 ' + Number(tier.remaining_percent || 0).toFixed(1) + '%</span></div>'
-          + '<div class="progress"><i class="' + tierCls + '" style="width:'
-          + Math.max(0, Math.min(100, tier.remaining_percent || 0)) + '%"></i></div>'
-          + (reset ? '<div class="small">' + esc(reset) + '</div>' : '') + '</div>';
-      }).join('');
-      return '<div class="' + cls.join(' ') + '"><div class="top">'
-        + '<span class="name">' + esc(item.id) + '</span><span class="small">套餐</span>'
-        + '<span class="val">' + esc(value) + '</span></div>'
-        + '<div class="meta">' + esc(meta) + '</div>' + tiers + '</div>';
-    }
-    if (item.unit === 'currency' || item.kind === 'balance') {
-      value = (item.remaining === null || item.remaining === undefined)
-        ? '不可用' : (item.currency || 'CNY') + ' ' + Number(item.remaining).toFixed(4);
-      if (item.limit) {
-        width = Math.max(0, Math.min(100, item.remaining / item.limit * 100));
-        meta = '总额 ' + Number(item.limit).toFixed(2);
-      }
-    } else {
-      value = (item.used === null ? '?' : item.used) + ' / ' + (item.limit === null ? '?' : item.limit) + ' ' + (item.unit || '');
-      width = Math.max(0, Math.min(100, (item.ratio || 0) * 100));
-      meta = '剩余 ' + fmtPct(item.ratio || 0);
-    }
-    if (item.reset_in_s !== null && item.reset_in_s !== undefined) meta += ' · 重置 ' + fmtDuration(item.reset_in_s);
-    if (item.source) meta += ' · ' + item.source;
-    if (item.error) meta += ' · ' + item.error;
-    const barCls = item.status === 'low' ? 'warn' : (item.status === 'error' ? 'bad' : '');
-    const bar = (item.limit || item.kind === 'window')
-      ? '<div class="progress"><i class="' + barCls + '" style="width:' + width + '%"></i></div>' : '';
-    return '<div class="' + cls.join(' ') + '"><div class="top">'
-      + '<span class="name">' + esc(item.id) + '</span><span class="small">' + esc(item.kind) + '</span>'
-      + '<span class="val">' + esc(value) + '</span></div>'
-      + '<div class="meta">' + esc(meta) + '</div>' + bar + '</div>';
-  }).join('');
-}
-
-async function loadUsage(force) {
-  const range = document.getElementById('usage-range');
-  if (force) range.textContent = '正在刷新…';
-  try {
-    const [summary, series, models, recent, quota] = await Promise.all([
-      apiFetch('/api/usage/summary?days=30').then(r => { if (!r.ok) throw new Error('读取用量失败'); return r.json(); }),
-      apiFetch('/api/usage/series?days=365').then(r => r.json()),
-      apiFetch('/api/usage/breakdown?by=model&days=30').then(r => r.json()),
-      apiFetch('/api/usage/recent?limit=30&days=30').then(r => r.json()),
-      apiFetch('/api/quota').then(r => r.json()),
-    ]);
-    const series365 = series.series || [];
-    renderUsageTiles(summary.summary, summary.today);
-    renderUsageChart(series365.slice(-30));
-    renderCalendar(series365);
-    renderUsageModels(models.rows || []);
-    renderUsageRecent(recent.requests || []);
-    renderQuota(quota);
-    range.textContent = '最近 30 天';
-    usageLoadedAt = Date.now();
-  } catch (error) {
-    range.textContent = '最近 30 天';
-    document.getElementById('usage-tiles').innerHTML = '<span class="small">' + esc(error.message) + '</span>';
-  }
-}
-
-async function refreshQuota() {
-  const el = document.getElementById('quota-list');
-  el.innerHTML = '<span class="small">正在刷新余额…</span>';
-  try {
-    const r = await apiFetch('/api/quota/refresh', {method: 'POST'});
-    renderQuota(await r.json());
-  } catch (error) {
-    el.innerHTML = '<span class="small">' + esc(error.message) + '</span>';
-  }
-}
-
-// 首次加载
-updateDaemonStatus();
-setInterval(updateDaemonStatus, 5000);
-</script>
-</body></html>
+<div id="toast" class="toast" role="status"></div>
+<noscript><p class="noscript">此工作台需要启用 JavaScript 才能连接服务。</p></noscript>
+</body>
+</html>

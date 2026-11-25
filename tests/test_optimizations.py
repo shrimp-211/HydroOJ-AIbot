@@ -532,9 +532,9 @@ class _FakeAI(AIClient):
 class TestSolveFlowOffline:
     def _run(self, tmp_path, monkeypatch, verdicts, cli=None, accumulate=False):
         monkeypatch.chdir(tmp_path)
-        # 用仓库自带的 config.json 作为模型表（没有则退回默认值），
+        # 用仓库自带的 config/config.example.json 作为模型表（没有则退回默认值），
         # 工件（dashboard.json / cost_accum.json）则写在隔离的 tmp 目录里。
-        fixture = Path(__file__).resolve().parents[1] / "config.example.json"
+        fixture = Path(__file__).resolve().parents[1] / "config" / "config.example.json"
         # 这些用例覆盖的是原三层循环；agent 路径由 TestSolverAgent 单独覆盖
         overrides = {"agent_enabled": False}
         overrides.update(cli or {})
@@ -609,7 +609,7 @@ class TestDifficultyToggle:
         assert result["is_ac"] is True
         assert ai.difficulty_probes == []
         # 未指定专用模型 → 沿用分层首个模型
-        fixture = Path(__file__).resolve().parents[1] / "config.example.json"
+        fixture = Path(__file__).resolve().parents[1] / "config" / "config.example.json"
         from hydroai.ai.router import ModelRouter
         default_model = ModelRouter(Config(config_path=str(fixture))).default.model
         assert default_model in oj.submitted[-1]

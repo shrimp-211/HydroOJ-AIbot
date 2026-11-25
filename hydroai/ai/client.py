@@ -106,6 +106,11 @@ class AIClient:
         self._unknown_price_warned = set()
         # 由求解器设置，用于把本次 AI 调用归到具体题目（逐请求统计）。
         self.problem_id = ""
+        try:
+            if config.get("usage_stats_enable", True):
+                get_store().prune_if_due(config.get("usage_retention_days", 365))
+        except Exception as exc:
+            log.debug("[用量] 自动清理检查失败: %s", type(exc).__name__)
 
     def _get_client(self, model_name: str = ""):
         """获取或创建 OpenAI 客户端，按 (base_url, api_key) 缓存"""

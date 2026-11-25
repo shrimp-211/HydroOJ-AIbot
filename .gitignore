@@ -1,33 +1,40 @@
+# 本地凭据与配置
 .env
-*.pyc
+config.json
+config (1).json
+config/config.json
+config/.env
+config/model_prices.json
+.ssh/
+.venv/
+
+# Python / 测试缓存
 __pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
 *.tmp
+tmp.md
+tmp2.md
+
+# 运行时数据
 dashboard.json
 cost_accum.json
 usage.db
 usage.db-wal
 usage.db-shm
+usage.db-journal
 model_prices.json
 agent_work/
 benchmark_processed.json
 processed_contests.json
 .msg_processed.json
-logs/
-agent_work/
-*.log
 .oj_cookies*.json
 td_output_*/
-.DS_Store
-config.json
-config (1).json
-tmp.md
-tmp2.md
-.ssh/
-
-.venv/
-.pytest_cache/
-
 data/
 backups/
 
-model_prices.json
+# 日志与系统文件
+logs/
+*.log
+.DS_Store

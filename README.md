@@ -22,6 +22,7 @@
 代码按领域拆分在 `hydroai/` 包中，仓库根目录只保留兼容入口脚本：
 
 ```text
+config/     用户配置：config.json、.env 及模板
 hydroai/
   config/   配置加载、校验、CLI、运行时路径
   ai/       AI 客户端、协议、路由、定价、提示词
@@ -33,7 +34,7 @@ hydroai/
 tests/      离线测试（由 pytest.ini 指定 pythonpath）
 ```
 
-`oj_solver.py`、`contest_solver.py`、`contest_daemon.py`、`webui.py`、`config_cli.py` 等根目录脚本只是入口包装，原有命令保持不变。运行数据（`dashboard.json`、`usage.db`、`model_prices.json`、`cost_accum.json`、Cookie、日志）仍写入 `OJ_DATA_DIR` 或当前工作目录。
+`oj_solver.py`、`contest_solver.py`、`contest_daemon.py`、`webui.py`、`config_cli.py` 等根目录脚本只是入口包装，原有命令保持不变。本地默认从 `config/` 读取 `config.json` 与 `.env`，并兼容旧根目录文件；`model_prices.json` 跟随配置文件目录。运行数据（`dashboard.json`、`usage.db`、`cost_accum.json`、Cookie、日志）仍写入 `OJ_DATA_DIR` 或当前工作目录。Docker 中 `OJ_DATA_DIR=/data`，`config.json` 与运行数据在持久化卷内；`.env` 由宿主机 `config/.env` 注入。
 
 ## 本地安装
 
@@ -61,7 +62,7 @@ pip install -r requirements.txt
 python config_cli.py init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example --profile economy
 ```
 
-`init` 创建 `config.json` 和空白 `.env`，不会覆盖已有文件。在 `.env` 填写：
+`init` 创建 `config/config.json` 和空白 `config/.env`，不会覆盖已有文件。在 `config/.env` 填写：
 
 ```dotenv
 OJ_USERNAME=your_username
@@ -79,7 +80,7 @@ python oj_solver.py https://your-oj.example/p/1000
 
 `doctor` 不访问 OJ 或 AI 服务，也不产生模型费用；通过只表示本地配置完整，不代表账号权限或远端服务可用。`--dry-run` 只获取题面，不请求 AI。
 
-已有配置可直接保留，也可参考 [完整配置示例](config.example.json)。指定其他配置文件执行初始化或诊断：
+已有配置可直接保留，也可参考 [完整配置示例](config/config.example.json)。指定其他配置文件执行初始化或诊断：
 
 ```bash
 python config_cli.py --config path/to/config.json doctor --json
@@ -87,7 +88,7 @@ python config_cli.py --config path/to/config.json doctor --json
 
 ## Docker / Compose 部署
 
-需要能运行 Linux 容器的 Docker Engine / Docker Desktop，以及 Docker Compose v2。仓库提供 `Dockerfile`、`compose.yaml`、`.dockerignore` 和 [.env.docker.example](.env.docker.example)。镜像基于 Python 3.12，包含 `g++`，以 UID/GID **10001:10001** 运行。
+需要能运行 Linux 容器的 Docker Engine / Docker Desktop，以及 Docker Compose v2。仓库提供 `Dockerfile`、`compose.yaml`、`.dockerignore` 和 [config/.env.docker.example](config/.env.docker.example)。镜像基于 Python 3.12，包含 `g++`，以 UID/GID **10001:10001** 运行。
 
 ### 首次启动
 
@@ -95,29 +96,29 @@ python config_cli.py --config path/to/config.json doctor --json
 
 ```bash
 # Linux / macOS
-cp .env.docker.example .env
+cp config/.env.docker.example config/.env
 # Windows PowerShell
-Copy-Item .env.docker.example .env
+Copy-Item config/.env.docker.example config/.env
 ```
 
-填写 `.env` 的 `OJ_USERNAME`、`OJ_PASSWORD`、`AI_API_KEY`、`WEBUI_AUTH_TOKEN`。
+填写 `config/.env` 的 `OJ_USERNAME`、`OJ_PASSWORD`、`AI_API_KEY`、`WEBUI_AUTH_TOKEN`。
 `WEBUI_AUTH_TOKEN` 请设置为自行生成的随机字符串；Compose 会拒绝使用空令牌启动。
-已有 `.env` 时保留它并补充 `WEBUI_AUTH_TOKEN`，不要用模板覆盖凭据。
+已有 `config/.env` 时保留它并补充 `WEBUI_AUTH_TOKEN`，不要用模板覆盖凭据。
 
 ```bash
-docker compose build
-docker compose run --rm cli init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example --profile economy
-docker compose run --rm cli doctor
-docker compose up -d web
+docker compose --env-file config/.env build
+docker compose --env-file config/.env run --rm cli init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example --profile economy
+docker compose --env-file config/.env run --rm cli doctor
+docker compose --env-file config/.env up -d web
 ```
 
 打开 [http://127.0.0.1:5000](http://127.0.0.1:5000)，进入「配置 → 访问设置」，填写 `WEBUI_AUTH_TOKEN` 后刷新配置。
-`.env` 的 `WEBUI_PORT` 可修改宿主机端口，例如 `WEBUI_PORT=8080`。
+`config/.env` 的 `WEBUI_PORT` 可修改宿主机端口，例如 `WEBUI_PORT=8080`。
 
 默认只启动 Web 面板。要开启比赛自动处理，再执行：
 
 ```bash
-docker compose --profile worker up -d
+docker compose --env-file config/.env --profile worker up -d
 ```
 
 守护进程默认包含进行中的比赛。只处理已结束的比赛，可把 `compose.yaml` 的 daemon 命令改为：
@@ -133,21 +134,21 @@ Compose 的 profiles 用法见 [Docker 官方文档](https://docs.docker.com/com
 `cli` 仅用于一次性任务，不会随普通 `up` 自动启动：
 
 ```bash
-docker compose run --rm cli doctor --json
-docker compose run --rm cli solve https://your-oj.example/p/1000
-docker compose run --rm cli contest https://your-oj.example/contest/CONTEST_ID --workers 2
-docker compose run --rm cli benchmark --start-page 2
-docker compose run --rm cli testdata https://your-oj.example/p/1000
-docker compose run --rm cli daemon --once --no-msg-backend --start-page 1
-docker compose run --rm cli usage --days 30
-docker compose run --rm cli quota --json
+docker compose --env-file config/.env run --rm cli doctor --json
+docker compose --env-file config/.env run --rm cli solve https://your-oj.example/p/1000
+docker compose --env-file config/.env run --rm cli contest https://your-oj.example/contest/CONTEST_ID --workers 2
+docker compose --env-file config/.env run --rm cli benchmark --start-page 2
+docker compose --env-file config/.env run --rm cli testdata https://your-oj.example/p/1000
+docker compose --env-file config/.env run --rm cli daemon --once --no-msg-backend --start-page 1
+docker compose --env-file config/.env run --rm cli usage --days 30
+docker compose --env-file config/.env run --rm cli quota --json
 ```
 
 容器入口还支持 `web`、`onebot`、`config`、`usage`、`quota` 和 `python`。例如：
 
 ```bash
-docker compose run --rm cli config --help
-docker compose run --rm cli solve --help
+docker compose --env-file config/.env run --rm cli config --help
+docker compose --env-file config/.env run --rm cli solve --help
 ```
 
 ### GitHub Actions 构建与发布
@@ -171,17 +172,17 @@ ghcr.io/shrimp-211/hydrooj-aibot:<tag>      # push v* 标签时
 ```bash
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
 docker pull ghcr.io/shrimp-211/hydrooj-aibot:latest
-IMAGE=ghcr.io/shrimp-211/hydrooj-aibot:latest docker compose up -d web
+IMAGE=ghcr.io/shrimp-211/hydrooj-aibot:latest docker compose --env-file config/.env up -d web
 ```
 
 `compose.yaml` 的 `image` 支持 `IMAGE` 变量，默认仍是本地构建的 `hydrooj-aibot:local`。首次发布后请在仓库的 Packages 设置中确认镜像可见性；公开镜像可以直接匿名拉取。工作流已声明 `packages: write`，无需额外 secret。
 
-直接使用 Docker 时，使用同一命名卷并传入 `.env`：
+直接使用 Docker 时，使用同一命名卷并传入 `config/.env`：
 
 ```bash
 docker build -t hydrooj-aibot:local .
-docker run --rm --init --env-file .env -v hydrooj-data:/data hydrooj-aibot:local init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example
-docker run --rm --init --env-file .env -v hydrooj-data:/data hydrooj-aibot:local doctor
+docker run --rm --init --env-file config/.env -v hydrooj-data:/data hydrooj-aibot:local init --model YOUR_MODEL --base-url https://your-api.example/v1 --oj-root https://your-oj.example
+docker run --rm --init --env-file config/.env -v hydrooj-data:/data hydrooj-aibot:local doctor
 ```
 
 直接 Docker 示例与 Compose 创建的卷相互独立；请固定使用同一种部署方式或明确迁移数据。
@@ -191,36 +192,36 @@ docker run --rm --init --env-file .env -v hydrooj-data:/data hydrooj-aibot:local
 - `/app`：镜像中的代码与提示词；升级镜像会更新它们。
 - `/tmp`：可执行的临时内存文件系统，供本地编译、样例验证和数据生成使用，容器停止后清空。
 - `/data`：命名卷，保存 `config.json`、`usage.db` 逐请求统计、费用统计、处理记录、Cookie、日志、本地验证目录和生成数据。
-- 宿主机 `.env`：由 Compose 注入环境变量，不会复制到镜像。变量优先于卷内 JSON 配置；修改后需要重新创建服务。
+- 宿主机 `config/.env`：由 Compose 注入环境变量，不会复制到镜像。变量优先于卷内 JSON 配置；修改后需要重新创建服务。
 
 ```bash
 # 查看状态和日志
-docker compose ps
-docker compose logs -f web daemon
+docker compose --env-file config/.env ps
+docker compose --env-file config/.env logs -f web daemon
 
 # 拉取更新、重建并启动
 git pull --ff-only
-docker compose build
-docker compose --profile worker up -d --force-recreate
+docker compose --env-file config/.env build
+docker compose --env-file config/.env --profile worker up -d --force-recreate
 
 # 停止服务，保留数据卷
-docker compose --profile worker down
+docker compose --env-file config/.env --profile worker down
 ```
 
 备份时先停止 daemon，保持 web 容器可用于复制，避免后台任务同时写入。创建宿主机 `backups` 目录后执行：
 
 ```bash
-docker compose stop daemon
-docker compose cp web:/data/. ./backups/
+docker compose --env-file config/.env stop daemon
+docker compose --env-file config/.env cp web:/data/. ./backups/
 ```
 
 恢复到现有 web 容器时：
 
 ```bash
-docker compose stop daemon
-docker compose cp ./backups/. web:/data/
-docker compose run --rm --user 0 --cap-add CHOWN --entrypoint chown cli -R 10001:10001 /data
-docker compose --profile worker up -d
+docker compose --env-file config/.env stop daemon
+docker compose --env-file config/.env cp ./backups/. web:/data/
+docker compose --env-file config/.env run --rm --user 0 --cap-add CHOWN --entrypoint chown cli -R 10001:10001 /data
+docker compose --env-file config/.env --profile worker up -d
 ```
 
 `down -v` 会删除数据卷；普通 `down` 会保留数据。详细卷管理见 [Docker 数据卷文档](https://docs.docker.com/engine/storage/volumes/)。
@@ -237,7 +238,7 @@ docker compose --profile worker up -d
 起始页包含在扫描范围内，后续继续逐页读取，最多读取 20 页；遇到空页、短页或重复页停止。
 **默认跳过第 1 页**；需要包含最新首页比赛时，设置为 `1`。指定某个比赛完整链接求解不受此设置影响。
 
-三种配置方式，优先级为 **命令行 > 环境变量 > config.json > 默认 2**：
+三种配置方式，优先级为 **命令行 > 环境变量 > config/config.json（Docker 为 /data/config.json） > 默认 2**：
 
 ```json
 {
@@ -253,7 +254,7 @@ OJ_CONTEST_START_PAGE=1
 python contest_daemon.py --start-page 1
 python benchmark_solver.py --start-page 3
 # Docker 单次运行覆盖
-docker compose run --rm cli daemon --once --start-page 1
+docker compose --env-file config/.env run --rm cli daemon --once --start-page 1
 ```
 
 Web 配置页的「监控守护 → 比赛列表起始页」可直接修改 JSON 值。必须填写大于等于 1 的整数。
@@ -302,7 +303,7 @@ Web 配置接口不返回密码或模型密钥原文；留空表示保留现有�
 python config_cli.py models --json
 python config_cli.py models --model YOUR_CONFIG_NAME
 # Docker
-docker compose run --rm cli config models --json
+docker compose --env-file config/.env run --rm cli config models --json
 ```
 
 API 地址支持粘贴完整的 `/chat/completions` 或 `/models` 地址，程序会还原基础地址，保留自定义路径前缀。
@@ -316,7 +317,7 @@ API 地址支持粘贴完整的 `/chat/completions` 或 `/models` 地址，程�
 python config_cli.py add-model fast --model-id YOUR_API_MODEL_ID --base-url https://your-api.example/v1 --api-key-env MY_PROVIDER_KEY --provider compatible
 ```
 
-先在 `.env` 设置 `MY_PROVIDER_KEY`；Docker 需要将新增变量注入容器后重新创建服务。
+先在 `config/.env` 设置 `MY_PROVIDER_KEY`；Docker 需要将新增变量注入容器后重新创建服务。
 `fast` 是本地配置别名，`model_id` 是真正发给 API 的模型 ID。重复配置名会被拒绝，原连接不会被覆盖。
 加入 `--set-default` 会将它设为默认，并切换为该模型的单模型路由；需要多模型时继续配置 `model_router.tiers`。
 Web 的「配置 → 接入模型」提供相同流程：选择已有连接获取列表，再填写别名、模型 ID、地址及密钥变量名。
@@ -345,7 +346,7 @@ python config_cli.py prices --refresh
 # 查看本地价格、来源、是否过期以及未匹配原因；不联网
 python config_cli.py prices --json
 # Docker
-docker compose run --rm cli config prices --refresh
+docker compose --env-file config/.env run --rm cli config prices --refresh
 ```
 
 CLI 的 `prices --usd-to-cny RATE` 可保存汇率；Web 的「自动定价」可以设置汇率、刷新间隔并查看结果。
@@ -382,11 +383,14 @@ CLI 的 `prices --usd-to-cny RATE` 可保存汇率；Web 的「自动定价」�
 ```bash
 python config_cli.py usage --days 30   # 汇总、按模型分布、今日
 python config_cli.py usage --json
+python config_cli.py usage --prune     # 按 usage_retention_days 立即清理旧明细
 python config_cli.py quota             # 额度与余额
 python config_cli.py quota --refresh   # 强制刷新远端余额（忽略缓存）
 ```
 
-Web 面板的「用量与额度」页展示概览卡片、额度进度与重置倒计时、每日趋势、按模型分布和最近请求。私信/控制台可用 `usage` / `用量`、`quota` / `额度`。
+Web 面板的「用量与额度」页展示概览卡片、额度进度与重置倒计时、每日趋势、全年热力图、按模型/供应商/任务分布和最近请求。配置页底部提供「高级配置（JSON）」，可编辑包括 `quotas` 在内的全部字段；密钥不会回显，省略 `api_key` 会保留原值，设为 `null` 清除，`*_configured` 标记在保存时自动忽略。私信/控制台可用 `usage` / `用量`、`quota` / `额度`。
+
+Web API 鉴权：`/config`、`/run/*`、`/daemon/*`、`/api/usage/*`、`/api/quota`、`/api/stats`、`/api/today`、`/api/history`、`/history` 均要求 `X-Auth-Token`（未设置 Token 时仅允许本机访问）；`/status` 保持公开供容器健康检查。`/stream` 由前端先申请 60 秒短时票据再连接，避免把长期 Token 放进 URL。
 
 ```json
 {
@@ -419,7 +423,7 @@ Web 面板的「用量与额度」页展示概览卡片、额度进度与重置�
 - New API：`base_url` 填站点根地址，`api_key` 填访问令牌，`headers` 加 `{"New-Api-User": "<用户 ID>"}`。Sub2API：`base_url` 填站点地址，`api_key` 填供应商 Key；两者都按 cc-switch 的模板换算余额。
 - 余额/套餐查询使用额度项的 `api_key`（支持 `env:NAME` / `${NAME}`），否则使用 `models` 中第一个模型的密钥；未指定模型时才回退全局密钥，避免串用其他供应商凭据。查询不跟随重定向，错误信息不包含密钥。
 - 远端结果缓存 `cache_seconds`（默认 300 秒）；失败时回退到最近一次有效快照并标记过期。费用依赖定价，未知价格会明确标注，不按免费处理。
-- `usage_retention_days` 控制明细保留天数；数据库只追加请求记录，单次写入失败不会中断 AI 调用。
+- `usage_retention_days` 控制明细保留天数；AI 客户端每天最多自动清理一次，也可用 `python config_cli.py usage --prune` 立即执行。数据库只追加请求记录，单次写入失败不会中断 AI 调用。
 - 官方 OAuth 订阅（Claude / Codex / Gemini / Grok 的账号配额）需要读取本机 CLI 的 OAuth 凭据，本项目未接入；火山方舟（需要 AK/SK 签名）与 Command Code 的多接口组合也暂未实现。这些供应商可继续使用 `window` 本地窗口或 `generic` 余额模板。
 
 ### 模型协议参数
@@ -554,7 +558,7 @@ python config_cli.py doctor --json
 | 没有扫描到比赛 | 默认起始页为 2；先试 `--start-page 1`，再检查域名、登录权限及处理记录 |
 | API Key 缺失 | 运行 doctor；检查模型引用的环境变量，不会自动改用其他服务的密钥 |
 | 修改 Web 配置不生效 | 环境变量优先于 JSON，模型独立配置优先于全局字段；容器环境变量修改后需重新创建 |
-| Web 配置返回 403 | 在访问设置填写与 `.env` 相同的 `WEBUI_AUTH_TOKEN` |
+| Web 配置返回 403 | 在访问设置填写与 `config/.env` 相同的 `WEBUI_AUTH_TOKEN` |
 | 回复达到长度上限 | 调高对应任务预算和模型上限，检查推理 token 是否占用输出额度 |
 | 不支持某个请求参数 | 调整 provider、token_parameter、supports_reasoning_effort、thinking 或 stream_usage |
 | 缺少本地工具链 | 本地安装 g++ / clang++，或使用内置 g++ 的 Docker 镜像 |

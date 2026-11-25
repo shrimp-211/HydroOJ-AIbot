@@ -1,5 +1,6 @@
 """Configuration lifecycle, offline diagnostics and Web API regressions."""
 import json
+from datetime import datetime
 from pathlib import Path
 import pytest
 
@@ -153,3 +154,76 @@ def test_doctor_malformed_json_exit_code_and_no_secret_echo(tmp_path, capsys):
     assert main(['--config', str(path), 'doctor', '--json']) == 1
     output = capsys.readouterr().out
     assert 'secret-broken-value' not in output and json.loads(output)['ok'] is False
+
+
+def test_web_safe_config_round_trip_preserves_secrets(web):
+    client, path = web
+    headers = {'X-Auth-Token': 'access'}
+    write(path, {
+        'ai_api_key': 'sk-secret',
+        'password': 'pw-secret',
+        'models': {'m': {'api_key': 'sk-model', 'max_tokens': 1000}},
+        'quotas': {'q': {'kind': 'balance', 'source': 'manual', 'balance': 1.0,
+                         'api_key': 'env:QKEY',
+                         'headers': {'Authorization': 'Bearer hdr-secret',
+                                     'New-Api-User': '42'}}},
+    })
+    response = client.get('/config', headers=headers)
+    assert response.status_code == 200
+    text = response.get_data(as_text=True)
+    for secret in ('sk-secret', 'pw-secret', 'sk-model', 'hdr-secret'):
+        assert secret not in text
+    safe = response.get_json()
+    assert safe['ai_api_key_configured'] and safe['password_configured']
+    assert safe['models']['m']['api_key_configured']
+    assert safe['quotas']['q']['api_key_configured']
+    assert safe['quotas']['q']['headers']['Authorization_configured']
+
+    # 把脱敏后的配置原样提交：*_configured 应被忽略，原密钥/头保持不变。
+    assert client.post('/config', headers=headers, json=safe).status_code == 200
+    raw = read_config(path)
+    assert raw['ai_api_key'] == 'sk-secret'
+    assert raw['password'] == 'pw-secret'
+    assert raw['models']['m']['api_key'] == 'sk-model'
+    assert raw['quotas']['q']['api_key'] == 'env:QKEY'
+    assert raw['quotas']['q']['headers']['Authorization'] == 'Bearer hdr-secret'
+    assert raw['quotas']['q']['headers']['New-Api-User'] == '42'
+
+    def no_markers(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                assert not key.endswith('_configured'), key
+                no_markers(item)
+        elif isinstance(value, list):
+            for item in value:
+                no_markers(item)
+
+    no_markers(raw)
+
+
+def test_web_sensitive_endpoints_require_auth_and_stream_ticket(web):
+    client, _ = web
+    headers = {'X-Auth-Token': 'access'}
+    for url in ('/api/stats', '/api/today', '/api/history', '/history'):
+        assert client.get(url).status_code == 403
+        assert client.get(url, headers=headers).status_code == 200
+    assert client.get('/stream').status_code == 403
+    assert client.post('/stream/ticket').status_code == 403
+    ticket = client.post('/stream/ticket', headers=headers).get_json()['ticket']
+    assert ticket and len(ticket) > 20
+
+
+def test_web_stats_ignore_contest_records(web):
+    client, path = web
+    headers = {'X-Auth-Token': 'access'}
+    today = datetime.now().strftime('%m-%d')
+    (path.parent / 'dashboard.json').write_text(json.dumps({'history': [
+        {'pid': '1', 'status': 'ac', 'finished_at': f'{today} 10:00:00',
+         'tokens_in': 10, 'tokens_out': 5, 'cost': 0.1, 'elapsed_s': 1},
+        {'type': 'contest', 'cid': 'c1', 'finished_at': f'{today} 11:00:00',
+         'total': 3, 'ac': 2},
+    ]}), encoding='utf-8')
+    stats = client.get('/api/stats', headers=headers).get_json()
+    assert stats['total'] == 1 and stats['ac'] == 1 and stats['fail'] == 0
+    today_stats = client.get('/api/today', headers=headers).get_json()
+    assert today_stats['total'] == 1 and today_stats['ac'] == 1

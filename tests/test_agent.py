@@ -32,7 +32,10 @@ GEN = ('#include <cstdio>\n#include <cstdlib>\n'
 
 
 def _cfg(tmp_path, **over):
-    fixture = Path(__file__).resolve().parents[1] / "config.json"
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "config" / "config.json"
+    if not fixture.exists():
+        fixture = root / "config.json"
     base = {"agent_enabled": True}
     base.update(over)
     return Config(config_path=str(fixture if fixture.exists() else tmp_path / "none.json"),

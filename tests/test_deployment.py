@@ -6,7 +6,7 @@ import pytest
 from hydroai.oj.catalog import list_contests, positive_int
 from hydroai.config.manager import ConfigManager
 from hydroai.cli.entrypoint import command_args
-from hydroai.config.paths import data_dir, data_file
+from hydroai.config.paths import config_file, data_dir, data_file
 
 
 class Session:
@@ -91,6 +91,23 @@ def test_benchmark_uses_shared_start_page():
     assert scanned == [('system', 'a-0')]
 
 
+def test_config_file_prefers_config_dir_then_legacy(tmp_path, monkeypatch):
+    monkeypatch.delenv('OJ_DATA_DIR', raising=False)
+    assert config_file('config.json', tmp_path) == tmp_path / 'config' / 'config.json'
+    (tmp_path / 'config').mkdir()
+    (tmp_path / 'config' / 'config.json').write_text('{}', encoding='utf-8')
+    (tmp_path / 'config.json').write_text('{}', encoding='utf-8')
+    assert config_file('config.json', tmp_path) == tmp_path / 'config' / 'config.json'
+    (tmp_path / 'config' / 'config.json').unlink()
+    assert config_file('config.json', tmp_path) == tmp_path / 'config.json'
+    monkeypatch.setenv('OJ_DATA_DIR', str(tmp_path / 'data'))
+    assert config_file('config.json', tmp_path) == tmp_path / 'data' / 'config.json'
+    # 显式 OJ_DATA_DIR 优先；移除后回到 config/（若存在）。
+    monkeypatch.delenv('OJ_DATA_DIR', raising=False)
+    (tmp_path / 'config' / 'config.json').write_text('{}', encoding='utf-8')
+    assert config_file('config.json', tmp_path) == tmp_path / 'config' / 'config.json'
+
+
 def test_runtime_paths_and_config_share_data_directory(tmp_path, monkeypatch):
     data = tmp_path / 'data'
     data.mkdir()
@@ -130,6 +147,7 @@ def test_ci_builds_and_publishes_docker_image():
     assert 'ghcr.io' in workflow
     assert 'packages: write' in workflow
     assert 'hydroai.usage.store' in smoke and 'usage --json' in smoke and 'quota --json' in smoke
+    assert 'ENV_FILE=config/.env' in smoke
     assert '${IMAGE:-hydrooj-aibot:local}' in (root / 'compose.yaml').read_text(encoding='utf-8')
 
 
@@ -137,6 +155,9 @@ def test_dockerfile_contains_package_and_resources():
     root = Path(__file__).resolve().parents[1]
     dockerfile = (root / 'Dockerfile').read_text(encoding='utf-8')
     assert 'COPY hydroai/ ./hydroai/' in dockerfile
+    assert 'COPY config/config.example.json' in dockerfile
+    assert (root / 'config/config.example.json').exists()
+    assert (root / 'config/.env.example').exists()
     assert (root / 'hydroai/web/templates/index.html').exists()
     assert (root / 'hydroai/ai/prompts.json').exists()
     usage = command_args(['usage', '--json'])
