@@ -139,11 +139,23 @@ def _pid_alive_windows(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def _proc_state(pid: int) -> str:
+    """Linux /proc 状态；非 Linux 或不可读时返回空串。"""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        return raw.rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return ""
+
+
 def pid_alive(pid: int) -> bool:
     if not pid or pid <= 0:
         return False
     if os.name == "nt":
         return _pid_alive_windows(pid)
+    # 僵尸进程仍能被 kill(pid, 0) 命中，但已经不能执行任务。
+    if _proc_state(pid) in ("Z", "X"):
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
