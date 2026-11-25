@@ -1,5 +1,5 @@
 x-runtime: &runtime
-  image: hydrooj-aibot:local
+  image: ${IMAGE:-hydrooj-aibot:local}
   build: .
   init: true
   env_file: .env

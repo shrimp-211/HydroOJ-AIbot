@@ -17,6 +17,24 @@
 
 所有命令请在项目目录运行。Docker 已设置独立的数据目录，无需手动管理工作路径。
 
+## 项目结构
+
+代码按领域拆分在 `hydroai/` 包中，仓库根目录只保留兼容入口脚本：
+
+```text
+hydroai/
+  config/   配置加载、校验、CLI、运行时路径
+  ai/       AI 客户端、协议、路由、定价、提示词
+  oj/       OJ 站点交互、样例解析、本地评测
+  solve/    单题/比赛求解、Agent、题解、测试数据
+  monitor/  比赛守护、私信、OneBot
+  usage/    usage.db 逐请求统计与订阅额度
+  web/      Web 面板、仪表盘、模板
+tests/      离线测试（由 pytest.ini 指定 pythonpath）
+```
+
+`oj_solver.py`、`contest_solver.py`、`contest_daemon.py`、`webui.py`、`config_cli.py` 等根目录脚本只是入口包装，原有命令保持不变。运行数据（`dashboard.json`、`usage.db`、`model_prices.json`、`cost_accum.json`、Cookie、日志）仍写入 `OJ_DATA_DIR` 或当前工作目录。
+
 ## 本地安装
 
 需要 Python **3.10+**。C++ 本地验证需要 `g++` 或 `clang++`；没有工具链时会回退到原求解流程。Python 本地验证使用当前 Python 环境。
@@ -121,14 +139,42 @@ docker compose run --rm cli contest https://your-oj.example/contest/CONTEST_ID -
 docker compose run --rm cli benchmark --start-page 2
 docker compose run --rm cli testdata https://your-oj.example/p/1000
 docker compose run --rm cli daemon --once --no-msg-backend --start-page 1
+docker compose run --rm cli usage --days 30
+docker compose run --rm cli quota --json
 ```
 
-容器入口还支持 `web`、`onebot`、`config` 和 `python`。例如：
+容器入口还支持 `web`、`onebot`、`config`、`usage`、`quota` 和 `python`。例如：
 
 ```bash
 docker compose run --rm cli config --help
 docker compose run --rm cli solve --help
 ```
+
+### GitHub Actions 构建与发布
+
+`.github/workflows/docker.yml` 在以下事件运行：
+
+- `push` 到 `main` 或 `v*` 标签
+- 任意 `pull_request`（只构建和冒烟测试，不推送）
+- 手动 `workflow_dispatch`
+
+流程：构建镜像 → 运行 `docker-smoke.sh`（初始化、诊断、`usage`/`quota` 命令、Web `/status`、`/api/usage/summary`、`/api/quota`、配置持久化）。PR 和手动触发只构建与冒烟测试；`push` 到 `main` 或标签时推送到 GitHub Container Registry：
+
+```text
+ghcr.io/shrimp-211/hydrooj-aibot:latest
+ghcr.io/shrimp-211/hydrooj-aibot:<commit-sha>
+ghcr.io/shrimp-211/hydrooj-aibot:<tag>      # push v* 标签时
+```
+
+使用已发布镜像（无需本地构建）：
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+docker pull ghcr.io/shrimp-211/hydrooj-aibot:latest
+IMAGE=ghcr.io/shrimp-211/hydrooj-aibot:latest docker compose up -d web
+```
+
+`compose.yaml` 的 `image` 支持 `IMAGE` 变量，默认仍是本地构建的 `hydrooj-aibot:local`。首次发布后请在仓库的 Packages 设置中确认镜像可见性；公开镜像可以直接匿名拉取。工作流已声明 `packages: write`，无需额外 secret。
 
 直接使用 Docker 时，使用同一命名卷并传入 `.env`：
 
@@ -144,7 +190,7 @@ docker run --rm --init --env-file .env -v hydrooj-data:/data hydrooj-aibot:local
 
 - `/app`：镜像中的代码与提示词；升级镜像会更新它们。
 - `/tmp`：可执行的临时内存文件系统，供本地编译、样例验证和数据生成使用，容器停止后清空。
-- `/data`：命名卷，保存 `config.json`、费用统计、处理记录、Cookie、日志、本地验证目录和生成数据。
+- `/data`：命名卷，保存 `config.json`、`usage.db` 逐请求统计、费用统计、处理记录、Cookie、日志、本地验证目录和生成数据。
 - 宿主机 `.env`：由 Compose 注入环境变量，不会复制到镜像。变量优先于卷内 JSON 配置；修改后需要重新创建服务。
 
 ```bash
@@ -329,6 +375,53 @@ CLI 的 `prices --usd-to-cny RATE` 可保存汇率；Web 的「自动定价」�
 }
 ```
 
+### 用量与订阅额度
+
+参考 cc-switch 的 Usage / Quotas & Balances 设计：每次 AI 请求写入 `usage.db`（SQLite），记录模型、供应商、任务、题目、输入/输出/缓存 token、费用、耗时与输出速度；额度在本地用量之上计算，也可查询供应商余额。
+
+```bash
+python config_cli.py usage --days 30   # 汇总、按模型分布、今日
+python config_cli.py usage --json
+python config_cli.py quota             # 额度与余额
+python config_cli.py quota --refresh   # 强制刷新远端余额（忽略缓存）
+```
+
+Web 面板的「用量与额度」页展示概览卡片、额度进度与重置倒计时、每日趋势、按模型分布和最近请求。私信/控制台可用 `usage` / `用量`、`quota` / `额度`。
+
+```json
+{
+  "usage_stats_enable": true,
+  "usage_retention_days": 365,
+  "quotas": {
+    "deepseek": {
+      "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
+      "kind": "balance",
+      "source": "deepseek",
+      "currency": "CNY",
+      "low_threshold": 5.0,
+      "cache_seconds": 300
+    },
+    "zhipu-coding": {
+      "models": ["glm-5.2"],
+      "kind": "window",
+      "unit": "cost",
+      "limit": 50.0,
+      "period": "5h",
+      "low_ratio": 0.1
+    }
+  }
+}
+```
+
+- `kind: window`：按 `models` 过滤本地用量，支持 `period: 5h|daily|weekly|monthly` 或滚动 `window_hours`，`unit: cost|tokens|requests`，给出剩余额度与重置倒计时。窗口是本地近似，官方限流以服务商为准。
+- `kind: balance`：`source: manual` 使用手工 `balance`；内置 `deepseek`、`stepfun`、`siliconflow`（国内 `.cn` / 国际 `.com`）、`openrouter`、`novita`、`mimo`（小米）、`zhipu`；`newapi` 与 `sub2api` 适配常见中转站；`generic` 用 `endpoint` + `json_path`（可选 `used_json_path` / `total_json_path`）适配任意 JSON 接口。
+- `kind: plan`：直接查询供应商套餐额度，返回 5 小时 / 每周 / 每月 / credits 多档百分比与重置时间。`source` 支持 `kimi`、`zhipu_plan`、`minimax`、`opencode_go`、`ollama`、`mimo_plan`。智谱、MiniMax、Kimi 的国内/国际端点会按 `base_url` 自动选择；请使用对应的套餐 API Key（例如 MiMo Token Plan 的 `tp-...`）。
+- New API：`base_url` 填站点根地址，`api_key` 填访问令牌，`headers` 加 `{"New-Api-User": "<用户 ID>"}`。Sub2API：`base_url` 填站点地址，`api_key` 填供应商 Key；两者都按 cc-switch 的模板换算余额。
+- 余额/套餐查询使用额度项的 `api_key`（支持 `env:NAME` / `${NAME}`），否则使用 `models` 中第一个模型的密钥；未指定模型时才回退全局密钥，避免串用其他供应商凭据。查询不跟随重定向，错误信息不包含密钥。
+- 远端结果缓存 `cache_seconds`（默认 300 秒）；失败时回退到最近一次有效快照并标记过期。费用依赖定价，未知价格会明确标注，不按免费处理。
+- `usage_retention_days` 控制明细保留天数；数据库只追加请求记录，单次写入失败不会中断 AI 调用。
+- 官方 OAuth 订阅（Claude / Codex / Gemini / Grok 的账号配额）需要读取本机 CLI 的 OAuth 凭据，本项目未接入；火山方舟（需要 AK/SK 签名）与 Command Code 的多接口组合也暂未实现。这些供应商可继续使用 `window` 本地窗口或 `generic` 余额模板。
+
 ### 模型协议参数
 
 这些可选字段位于 `models.<模型名>`：
@@ -472,22 +565,24 @@ python config_cli.py doctor --json
 
 ```bash
 python -m pytest -q
-python -m pytest test_ai_client.py test_configuration.py test_token_budgets.py test_deployment.py test_model_catalog.py -q
+python -m pytest tests/test_ai_client.py tests/test_configuration.py tests/test_token_budgets.py -q
 ```
 
-测试使用模拟 AI/OJ，不需要真实凭据；缺少编译器时相关本地编译测试自动跳过。
+`pytest.ini` 已设置 `testpaths = tests` 和 `pythonpath = .`。测试使用模拟 AI/OJ，不需要真实凭据；缺少编译器时相关本地编译测试自动跳过。
 GitHub Actions 覆盖 Windows / Linux、Python 3.10 / 3.12，并实际构建 Docker 镜像，验证编译器、配置持久化与 Web 启动。
 
 | 模块 | 职责 |
 | --- | --- |
-| `ai_client.py` / `ai_protocol.py` | AI 请求、流式处理、供应商参数和计费 |
-| `ai_context.py` / `prompt_defaults.py` / `prompts.json` | 修复上下文与提示词 |
-| `config_manager.py` / `config_io.py` / `config_cli.py` | 配置合并、热重载、验证、脱敏、初始化 |
-| `model_services.py` / `model_pricing.py` | 模型列表发现、地址归一化、价格目录缓存与汇率换算 |
-| `contest_catalog.py` | 守护进程和标程扫描共用的比赛分页 |
-| `runtime_paths.py` / `docker_entrypoint.py` | 运行数据路径与容器命令 |
-| `oj_solver.py` / `solver_agent.py` / `local_judge.py` | 求解编排、候选方案和本地评测 |
-| `editorial.py` / `oj_samples.py` | 题解校验与样例提取 |
-| `oj_common.py` / `dashboard.py` / `msg_backend.py` | OJ 会话、统计和消息 |
+| `hydroai/ai/client.py` / `protocol.py` | AI 请求、流式处理、供应商参数和计费 |
+| `hydroai/ai/context.py` / `prompts.py` / `prompts.json` | 修复上下文与提示词 |
+| `hydroai/config/manager.py` / `io.py` / `cli.py` | 配置合并、热重载、验证、脱敏、初始化 |
+| `hydroai/ai/services.py` / `pricing.py` | 模型列表发现、地址归一化、价格目录缓存与汇率换算 |
+| `hydroai/oj/catalog.py` | 守护进程和标程扫描共用的比赛分页 |
+| `hydroai/config/paths.py` / `hydroai/cli/entrypoint.py` | 运行数据路径与容器命令 |
+| `hydroai/solve/solver.py` / `agent.py` / `hydroai/oj/judge.py` | 求解编排、候选方案和本地评测 |
+| `hydroai/solve/editorial.py` / `hydroai/oj/samples.py` | 题解校验与样例提取 |
+| `hydroai/oj/common.py` / `hydroai/web/dashboard.py` / `hydroai/monitor/messaging.py` | OJ 会话、仪表盘和消息 |
+| `hydroai/usage/store.py` / `quota.py` | 逐请求 token/费用账本、订阅额度与余额 |
+| `hydroai/web/app.py` / `templates/` | Web 面板与用量/额度 API |
 
-旧的 `from oj_solver import AIClient` 继续兼容。许可证见 [LICENSE](LICENSE)。
+根目录的入口脚本只负责调用 `hydroai.*` 的 `main()`。内部模块请直接 `from hydroai.<包>.<模块> import ...`。许可证见 [LICENSE](LICENSE)。

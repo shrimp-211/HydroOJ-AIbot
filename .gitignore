@@ -4,6 +4,11 @@ __pycache__/
 *.tmp
 dashboard.json
 cost_accum.json
+usage.db
+usage.db-wal
+usage.db-shm
+model_prices.json
+agent_work/
 benchmark_processed.json
 processed_contests.json
 .msg_processed.json

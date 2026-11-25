@@ -16,8 +16,9 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY *.py prompts.json config.example.json ./
-COPY templates/ ./templates/
+# Root entry scripts stay at /app; implementation and resources live in the package.
+COPY *.py config.example.json ./
+COPY hydroai/ ./hydroai/
 
 USER 10001:10001
 WORKDIR /data

@@ -8,6 +8,10 @@
 - [modelsDevAutoSync.ts](https://github.com/farion1231/cc-switch/blob/main/src/lib/modelsDevAutoSync.ts)：`syncModelsDevPricing` 与 6 小时启动同步节流，保存同步结果，按所选项目导入。
 - [model_fetch.rs](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/model_fetch.rs)：`fetch_models`、`build_models_url_candidates` 处理模型列表 URL 候选、格式差异与鉴权。
 - [model_fetch commands](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/commands/model_fetch.rs)：前端命令入口、覆盖模型列表地址及接口格式参数。
+- [balance.rs](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/balance.rs)：DeepSeek / StepFun / SiliconFlow / OpenRouter / Novita / 小米 MiMo / 智谱余额接口与解析。
+- [coding_plan.rs](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/coding_plan.rs)：Kimi / 智谱 / MiniMax / OpenCode Go / Ollama Cloud / MiMo Token Plan 的套餐额度。
+- [usage_script.rs](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/usage_script.rs)：自定义脚本与 New API / Sub2API 模板；本项目用声明式 `source` 适配，不执行 JavaScript。
+- [2.5-usage-query.md](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/zh/2-providers/2.5-usage-query.md)：额度查询的用户配置与提取器字段说明。
 - [OpenAI 模型列表](https://developers.openai.com/api/reference/python/resources/models/methods/list)：`GET /models` 返回可见模型 ID、所有者等基本信息，不等于模型推理能力说明。
 
 ## 在 bot 中采用的设计
@@ -17,6 +21,17 @@
 bot 保留人民币统计，显式配置 USD→CNY 汇率，手工定价始终优先，避免覆盖现有定价和预算。供应商/模型按精确 ID 匹配，公共分档价格暂要求手工配置，避免把不同网关、模型后缀或档位当作同一收费标准。
 
 模型接入只覆盖现有 Chat Completions 兼容协议。没有搬入 cc-switch 的桌面系统代理、OAuth、Anthropic/Google 原生协议转换或自定义请求头体系。支持同源模型列表覆盖，禁止带密钥跟随重定向。
+
+## 用量与额度（第二阶段）
+
+继续参考 cc-switch README 中的 **Usage dashboard** 与 **Quotas & balances**：
+
+- 逐请求记录：模型、供应商、任务、题目、输入/输出/缓存 token、费用、耗时、输出速度；聚合出按模型/供应商/任务分布、每日趋势与全年热力图。
+- 订阅额度：`window`（本地 5h / 每日 / 每周 / 每月用量窗口，支持 cost / tokens / requests）、`balance`（账户余额）与 `plan`（供应商套餐额度）。
+- 余额来源：手工、DeepSeek、StepFun、SiliconFlow（`.cn` / `.com`）、OpenRouter、Novita、小米 MiMo、智谱 GLM、New API、Sub2API，以及 `generic` JSON 路径适配。查询不跟随重定向，失败回退最近有效快照。
+- 套餐来源：Kimi Code、智谱 GLM Coding Plan、MiniMax、OpenCode Go、Ollama Cloud、小米 MiMo Token Plan；返回 5 小时 / 每周 / 每月 / credits 多档剩余比例与重置时间。
+- Python 实现位于 `hydroai/usage/store.py`（SQLite `usage.db`）与 `hydroai/usage/quota.py`，由 AI 客户端、CLI、Web 面板和守护进程共用；Docker 冒烟脚本覆盖 usage/quota 命令与 Web API。
+- 未搬入 cc-switch 的桌面托盘、官方 OAuth 订阅额度（Claude/Codex/Gemini/Grok）和自定义 JavaScript 脚本；火山方舟（AK/SK 签名）与 Command Code 多接口组合暂未实现。窗口额度是按本地用量计算的近似值，官方限流以服务商为准。
 
 ## 来源说明
 

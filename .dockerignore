@@ -25,3 +25,8 @@ backups
 *.tmp
 
 model_prices.json
+*.db
+*.db-wal
+*.db-shm
+tests
+pytest.ini
