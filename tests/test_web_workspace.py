@@ -29,9 +29,10 @@ class WorkspaceParser(HTMLParser):
             self.assets.append((attrs['src'], 'javascript'))
 
 
-def test_workspace_serves_local_assets_and_accessible_tabs():
+def test_workspace_serves_local_assets_and_accessible_tabs(monkeypatch):
+    monkeypatch.setattr(web, 'AUTH_TOKEN', 'access')
     client = app.test_client()
-    response = client.get('/')
+    response = client.get('/', headers={'X-Auth-Token': 'access'})
     assert response.status_code == 200
     page = WorkspaceParser()
     page.feed(response.get_data(as_text=True))
@@ -43,7 +44,7 @@ def test_workspace_serves_local_assets_and_accessible_tabs():
         assert asset.status_code == 200
         assert content_type in asset.content_type
 
-    for name in ('solve', 'usage', 'config'):
+    for name in ('solve', 'usage', 'models', 'config'):
         tab = page.elements[f'nav-{name}']
         panel = page.elements[tab['aria-controls']]
         assert tab['role'] == 'tab'
@@ -65,12 +66,13 @@ from threading import Barrier
 from hydroai.web import app as web
 
 web.ROOT = Path(sys.argv[1])
+web.AUTH_TOKEN = 'test-token'
 paths = ('/api/usage/summary', '/api/quota', '/api/usage/series', '/api/usage/breakdown')
 ready = Barrier(len(paths))
 
 def get(path):
     ready.wait()
-    response = web.app.test_client().get(path)
+    response = web.app.test_client().get(path, headers={'X-Auth-Token': 'test-token'})
     assert response.status_code == 200, path
     assert response.is_json, path
 
@@ -92,13 +94,13 @@ def test_kill_task_falls_back_when_os_has_no_killpg(monkeypatch):
             self.killed = True
 
     process = Process()
-    monkeypatch.setattr(web, 'AUTH_TOKEN', '')
+    monkeypatch.setattr(web, 'AUTH_TOKEN', 'access')
     monkeypatch.setattr(web, 'active_proc', process)
     monkeypatch.setattr(web, 'task_running', True)
     monkeypatch.setattr(web, 'emit', lambda _: None)
     monkeypatch.delattr(web.os, 'killpg', raising=False)
 
-    response = app.test_client().post('/kill')
+    response = app.test_client().post('/kill', headers={'X-Auth-Token': 'access'})
 
     assert response.status_code == 200
     assert process.killed
@@ -109,10 +111,11 @@ def test_stream_flushes_handshake_before_waiting_for_logs(monkeypatch):
     def empty_queue(*args, **kwargs):
         raise queue.Empty
 
-    monkeypatch.setattr(web, 'AUTH_TOKEN', '')
+    monkeypatch.setattr(web, 'AUTH_TOKEN', 'access')
     monkeypatch.setattr(web.log_queue, 'get', empty_queue)
     client = app.test_client()
-    ticket = client.post('/stream/ticket').get_json()['ticket']
+    ticket = client.post('/stream/ticket',
+                         headers={'X-Auth-Token': 'access'}).get_json()['ticket']
     response = client.get('/stream', query_string={'ticket': ticket}, buffered=False)
     try:
         assert response.mimetype == 'text/event-stream'

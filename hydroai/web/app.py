@@ -25,7 +25,8 @@ import threading
 import subprocess
 from datetime import datetime
 
-from flask import Flask, render_template_string, request, jsonify, Response
+from flask import (Flask, Response, jsonify, redirect, render_template_string,
+                   request, session, url_for)
 from werkzeug.serving import run_simple
 from hydroai.oj.common import load_config, load_dotenv, create_session, save_cookies, load_cookies, parse_root
 # 在处理并发请求前完成用量模块的初始化，避免首次打开用量页时抢占导入。
@@ -40,6 +41,13 @@ if sys.platform == "win32" and sys.stdout.isatty():
     except Exception: pass
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("WEBUI_SECRET_KEY") or secrets.token_hex(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("WEBUI_COOKIE_SECURE", "").lower()
+    in ("1", "true", "yes", "on"),
+)
 # 入口脚本与 data 目录的相对基准；测试会把它替换为临时目录。
 ROOT = project_root()
 
@@ -136,12 +144,97 @@ def run_script(args: list[str]):
 TEMPLATE_PATH = pathlib.Path(__file__).parent / "templates" / "index.html"
 PAGE = TEMPLATE_PATH.read_text(encoding="utf-8") if TEMPLATE_PATH.exists() else "<h1>模板文件缺失</h1>"
 
-
+LOGIN_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · HydroAI Web Console</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0d17; --panel:#151829; --border:#272b45; --text:#e6e8ff; --muted:#8b90b5; --accent:#8f82ff; --red:#ff6b6b; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:radial-gradient(circle at 20% 10%, #1c2140, var(--bg) 55%); color:var(--text); font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .login { width:min(420px, calc(100vw - 32px)); background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:28px; box-shadow:0 24px 80px #0008; }
+    .mark { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; background:linear-gradient(135deg,var(--accent),#5b4be0); font-weight:800; margin-bottom:18px; }
+    h1 { font-size:20px; margin:0 0 6px; }
+    p { color:var(--muted); margin:0 0 20px; }
+    label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+    input { width:100%; padding:11px 12px; border-radius:8px; border:1px solid var(--border); background:#0f1220; color:var(--text); font:inherit; }
+    input:focus { outline:2px solid var(--accent); outline-offset:1px; border-color:transparent; }
+    button { width:100%; margin-top:14px; padding:11px 12px; border:0; border-radius:8px; background:var(--accent); color:#0b0d17; font-weight:700; font-size:14px; cursor:pointer; }
+    button:hover { filter:brightness(1.08); }
+    .error { margin:0 0 14px; padding:9px 11px; border-radius:8px; background:#2a1519; color:var(--red); font-size:12px; }
+    .foot { margin-top:18px; color:var(--muted); font-size:11px; text-align:center; }
+  </style>
+</head>
+<body>
+  <main class="login">
+    <div class="mark">H</div>
+    <h1>HydroAI Web Console</h1>
+    <p>请输入访问令牌后继续。令牌由服务器的 WEBUI_AUTH_TOKEN 配置。</p>
+    {% if error %}<div class="error">{{ error|e }}</div>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{{ next_path|e }}">
+      <label for="token">访问 Token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password" autofocus required>
+      <button type="submit">登录</button>
+    </form>
+    <div class="foot">v{{ app_version }}</div>
+  </main>
+</body>
+</html>"""
 
 
 # ============================================================
 # 路由
 # ============================================================
+def _safe_next(value) -> str:
+    value = str(value or "/")
+    if not value.startswith("/") or value.startswith("//"):
+        return "/"
+    return value
+
+
+@app.before_request
+def require_login():
+    # 健康检查、版本号、静态资源与登录页公开；其余页面先登录。
+    if request.endpoint in ("login", "static", "status", "api_version"):
+        return None
+    if request.path.startswith("/static/"):
+        return None
+    if request.path == "/" and not _check_auth():
+        return redirect(url_for("login", next=request.path))
+    return None
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    next_path = _safe_next(request.args.get("next") or request.form.get("next"))
+    if not AUTH_TOKEN:
+        return render_template_string(
+            LOGIN_PAGE, error="服务器未配置 WEBUI_AUTH_TOKEN，Web 已禁用。",
+            next_path="", app_version=APP_VERSION), 503
+    if request.method == "GET" and session.get("authenticated"):
+        return redirect(next_path)
+    error = ""
+    if request.method == "POST":
+        token = request.form.get("token", "")
+        if secrets.compare_digest(token, AUTH_TOKEN):
+            session.clear()
+            session["authenticated"] = True
+            return redirect(next_path)
+        error = "Token 不正确，请重试。"
+        time.sleep(0.4)
+    return render_template_string(LOGIN_PAGE, error=error, next_path=next_path,
+                                  app_version=APP_VERSION), (401 if error else 200)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
 @app.route("/")
 def index():
     return render_template_string(PAGE, app_version=APP_VERSION)
@@ -233,6 +326,86 @@ def models_add():
         return jsonify(result)
     except (ValueError, TypeError, OSError):
         return jsonify({'error': '新增失败：请检查名称是否重复、URL、供应商和环境变量名'}), 400
+
+
+@app.route('/api/providers')
+def api_providers():
+    if not _check_auth():
+        return jsonify({'error': '未授权'}), 403
+    from hydroai.ai.providers import CATEGORIES, preset_list
+    try:
+        manager = ConfigManager(str(config_file('config.json', ROOT)))
+        cfg = manager.cfg
+        tiers = (cfg.model_router or {}).get('tiers', {}) or {}
+        names = list((cfg.models or {}).keys())
+        if cfg.ai_model and cfg.ai_model not in names:
+            names.append(cfg.ai_model)
+        configured = []
+        for name in names:
+            if str(name).startswith('_'):
+                continue
+            settings = manager.get_model_config(name)
+            configured.append({
+                'name': name,
+                'model_id': settings.get('model_id') or name,
+                'base_url': settings.get('base_url') or '',
+                'provider': settings.get('provider') or '',
+                'api_key_configured': bool(settings.get('api_key')),
+                'current': name == cfg.ai_model,
+                'tiers': [tier for tier, model in tiers.items() if model == name],
+                'pricing_known': bool(settings.get('pricing')),
+            })
+        configured.sort(key=lambda item: (not item['current'], item['name']))
+        return jsonify({
+            'presets': preset_list(),
+            'categories': CATEGORIES,
+            'configured': configured,
+            'active': {'model': cfg.ai_model, 'tiers': tiers},
+        })
+    except (OSError, ValueError, TypeError, AttributeError):
+        return jsonify({'error': '无法读取模型配置'}), 400
+
+
+@app.route('/api/models/switch', methods=['POST'])
+def api_models_switch():
+    if not _check_auth():
+        return jsonify({'error': '未授权'}), 403
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'error': '需要 JSON 对象'}), 400
+    name = body.get('name')
+    if not isinstance(name, str) or not name.strip():
+        return jsonify({'error': '缺少模型名称'}), 400
+    single = body.get('single', True)
+    if type(single) is not bool:
+        return jsonify({'error': 'single 必须是 bool'}), 400
+    try:
+        with _config_lock:
+            path = config_file('config.json', ROOT)
+            doc = read_config(path)
+            models = doc.get('models') or {}
+            if name not in models and name != doc.get('ai_model'):
+                raise ValueError('模型不存在，请先添加')
+            doc['ai_model'] = name
+            if single:
+                doc['model_router'] = {'tiers': {
+                    'flash': name, 'pro': name, 'max': name}}
+                doc['difficulty_skip_model'] = ''
+            errors = validate_document(doc)
+            if errors:
+                raise ValueError('; '.join(errors))
+            atomic_write_json(path, doc)
+        try:
+            from hydroai.ai.health import clear_health_cache
+            clear_health_cache()
+        except Exception:
+            pass
+        emit(f'已切换模型: {name}' + ('（单模型路由）' if single else ''))
+        return jsonify({'ok': True, 'active': name, 'single': single,
+                        'tiers': (doc.get('model_router') or {}).get('tiers', {})})
+    except (ValueError, TypeError, OSError) as exc:
+        return jsonify({'error': str(exc) if isinstance(exc, ValueError)
+                        else '无法保存配置'}), 400
 
 
 @app.route('/pricing', methods=['GET'])
@@ -627,10 +800,13 @@ def get_history():
 
 
 def _check_auth() -> bool:
-    """检查 X-Auth-Token；未设置时仅允许本地访问"""
+    """强制鉴权：登录会话 Cookie 或 X-Auth-Token，二选一。"""
+    if session.get("authenticated"):
+        return True
     if not AUTH_TOKEN:
-        return request.remote_addr in ("127.0.0.1", "::1", "localhost")
-    return request.headers.get("X-Auth-Token", "") == AUTH_TOKEN
+        return False
+    token = request.headers.get("X-Auth-Token", "")
+    return secrets.compare_digest(token, AUTH_TOKEN)
 
 
 @app.route("/stream/ticket", methods=["POST"])
@@ -716,6 +892,10 @@ def main():
 
     global AUTH_TOKEN
     AUTH_TOKEN = _args.auth_token
+    if not AUTH_TOKEN:
+        print("[-] 必须设置 WEBUI_AUTH_TOKEN（或 --auth-token）才能启动 WebUI",
+              file=sys.stderr)
+        sys.exit(2)
 
     print(f"[*] OJ Solver WebUI 启动: http://{_args.host}:{_args.port}")
     if AUTH_TOKEN: print("[*] 已启用鉴权 Token")

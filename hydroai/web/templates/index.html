@@ -35,9 +35,10 @@
     <div class="nav-tabs" role="tablist" aria-label="工作区" aria-orientation="vertical">
       <button type="button" role="tab" id="nav-solve" aria-controls="tab-solve" aria-selected="true">{{ icon('run') }} <span>求解工作台</span></button>
       <button type="button" role="tab" id="nav-usage" aria-controls="tab-usage" aria-selected="false" tabindex="-1">{{ icon('chart') }} <span>用量与额度</span></button>
+      <button type="button" role="tab" id="nav-models" aria-controls="tab-models" aria-selected="false" tabindex="-1">{{ icon('sliders') }} <span>模型供应商</span></button>
       <button type="button" role="tab" id="nav-config" aria-controls="tab-config" aria-selected="false" tabindex="-1">{{ icon('sliders') }} <span>配置</span></button>
     </div>
-    <div class="sidebar-footer"><span class="sidebar-footer-mark"></span> HydroAI Web Console · v{{ app_version }}</div>
+    <div class="sidebar-footer"><span class="sidebar-footer-mark"></span> HydroAI Web Console · v{{ app_version }}<button type="button" class="btn btn-quiet" style="margin-top:8px;width:100%" onclick="logoutWeb()">退出登录</button></div>
   </aside>
 
   <main class="workspace" id="workspace" tabindex="-1">
@@ -164,12 +165,44 @@
       </section>
 
       <!-- 配置面板 -->
+      <section id="tab-models" role="tabpanel" aria-labelledby="nav-models" tabindex="0" hidden>
+        <header class="page-heading"><div><p class="eyebrow">MODELS</p><h1>模型供应商</h1><p>预置供应商、接入 API Key，并一键切换当前模型。</p></div></header>
+        <div class="provider-layout">
+          <aside class="card provider-side">
+            <div class="card-heading"><div><h2>当前模型</h2><p id="provider-current">加载中…</p></div></div>
+            <div class="provider-list" id="configured-models"></div>
+            <p class="small mt8" id="provider-active-tiers"></p>
+          </aside>
+          <div class="card provider-main">
+            <div class="card-heading"><div><h2>预置供应商</h2><p>选择预设后填写 API Key 环境变量；模型 ID 可以修改。</p></div></div>
+            <div class="provider-toolbar">
+              <input id="provider-search" type="search" placeholder="搜索供应商、网址或别名…" autocomplete="off">
+              <select id="provider-category" aria-label="供应商分类"></select>
+            </div>
+            <div id="provider-presets" class="preset-grid"></div>
+            <form id="provider-form" class="provider-form" hidden>
+              <input type="hidden" id="preset-pricing">
+              <div class="card-heading"><div><h2 id="provider-form-title">添加供应商</h2><p id="provider-form-note"></p></div><button type="button" class="btn btn-quiet" id="provider-form-close">取消</button></div>
+              <div class="fields">
+                <label>配置名称<input id="preset-name" required></label>
+                <label>模型 ID<input id="preset-model" required></label>
+                <label>Base URL<input id="preset-base" placeholder="https://..."></label>
+                <label>API Key 环境变量<input id="preset-key-env" required></label>
+                <label>协议<select id="preset-provider"><option value="compatible">compatible</option><option value="openai">openai</option><option value="deepseek">deepseek</option><option value="zhipu">zhipu</option></select></label>
+                <label class="check"><input type="checkbox" id="preset-set-default" checked> 添加后设为当前模型</label>
+              </div>
+              <div class="btn-group"><button class="btn btn-primary" type="submit">添加供应商</button><span class="msg" id="provider-msg"></span></div>
+            </form>
+          </div>
+        </div>
+      </section>
+
       <section id="tab-config" role="tabpanel" aria-labelledby="nav-config" tabindex="0" hidden>
         <header class="page-heading"><div><p class="eyebrow">SETTINGS</p><h1>配置</h1><p>管理 OJ 账户、模型连接及求解策略。</p></div></header>
         <div class="detail-grid">
           <form class="card full access-card" id="access-form">
-            <div class="card-heading"><div><h2>网页访问令牌</h2><p id="access-help">仅在服务器要求验证时填写。令牌保存在当前浏览器会话，不写入服务器配置。</p></div></div>
-            <div class="inline-form"><div><label for="cfg-web-token">访问令牌</label><input id="cfg-web-token" type="password" autocomplete="off" aria-describedby="access-help"></div><button type="submit" class="btn">应用令牌</button></div>
+            <div class="card-heading"><div><h2>脚本访问令牌（可选）</h2><p id="access-help">网页登录已改用会话 Cookie；这里仅把 X-Auth-Token 保存到当前浏览器会话，便于脚本/调试调用。</p></div></div>
+            <div class="inline-form"><div><label for="cfg-web-token">API Token</label><input id="cfg-web-token" type="password" autocomplete="off" aria-describedby="access-help"></div><button type="submit" class="btn">应用令牌</button></div>
           </form>
 
           <form id="config-form" class="full stack">

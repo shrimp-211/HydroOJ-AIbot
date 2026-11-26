@@ -32,6 +32,11 @@ async function requestJSON(path, {body, method, signal} = {}) {
   return data;
 }
 
+async function logoutWeb() {
+  try { await fetch('/logout', {method: 'POST'}); }
+  finally { location.href = '/login'; }
+}
+
 function message(id, text, state = 'idle') {
   const element = $(id);
   element.hidden = !text;
@@ -77,6 +82,7 @@ function openPage(name, focus = false) {
   $('current-page').textContent = title;
   document.title = `${title} · HydroAI`;
   if (name === 'config' && !configLoaded) loadConfig();
+  if (name === 'models' && !providersLoaded) loadProviders();
   if (name === 'usage' && Date.now() - usageLoadedAt > 30000) refreshUsage();
   if (selected === tabs[0]) refreshHistory();
 }
@@ -807,6 +813,265 @@ $('usage-refresh').addEventListener('click', () => withButton('usage-refresh', (
 $('usage-breakdown-by').addEventListener('change', loadBreakdown);
 $('quota-refresh').addEventListener('click', () => withButton('quota-refresh', () =>
   loadUsagePart('quota', 'quota-list', '/api/quota/refresh', renderQuota, {method: 'POST'})));
+
+// ── 模型供应商（cc-switch 风格）──
+const providerState = {
+  presets: [], categories: [], configured: [], active: null,
+  search: '', category: 'all', preset: null,
+};
+let providersLoaded = false;
+
+function providerInitial(name) {
+  return String(name || '?').trim().slice(0, 1).toUpperCase();
+}
+function providerCategoryName(id) {
+  return (providerState.categories.find(item => item.id === id) || {}).name || id;
+}
+
+async function loadProviders(force = false) {
+  if (providersLoaded && !force) return;
+  message('provider-current', '正在读取模型配置…');
+  try {
+    const data = await requestJSON('/api/providers');
+    providerState.presets = data.presets || [];
+    providerState.categories = data.categories || [];
+    providerState.configured = data.configured || [];
+    providerState.active = data.active || {};
+    providersLoaded = true;
+    renderProviderCategories();
+    renderProviders();
+  } catch (error) {
+    message('provider-current', '加载失败：' + error.message, 'error');
+  }
+}
+
+function renderProviderCategories() {
+  const select = $('provider-category');
+  const current = select.value || providerState.category || 'all';
+  select.replaceChildren();
+  const all = document.createElement('option');
+  all.value = 'all';
+  all.textContent = '全部供应商';
+  select.appendChild(all);
+  for (const category of providerState.categories) {
+    const option = document.createElement('option');
+    option.value = category.id;
+    option.textContent = category.name;
+    select.appendChild(option);
+  }
+  select.value = [...select.options].some(option => option.value === current) ? current : 'all';
+  providerState.category = select.value;
+}
+
+function renderProviders() {
+  const active = providerState.active || {};
+  const current = $('provider-current');
+  current.hidden = false;
+  current.textContent = active.model ? `当前：${active.model}` : '未设置当前模型';
+  const tiers = active.tiers || {};
+  $('provider-active-tiers').textContent = Object.keys(tiers).length
+    ? '路由：' + Object.entries(tiers).map(([key, value]) => `${key}=${value}`).join(' · ')
+    : '尚未设置分层路由';
+
+  const list = $('configured-models');
+  list.replaceChildren();
+  if (!providerState.configured.length) {
+    const empty = document.createElement('p');
+    empty.className = 'small';
+    empty.textContent = '尚未接入模型。从右侧预置供应商开始添加。';
+    list.appendChild(empty);
+  }
+  for (const item of providerState.configured) {
+    const card = document.createElement('div');
+    card.className = 'provider-card' + (item.current ? ' active' : '');
+    const head = document.createElement('div');
+    head.className = 'provider-card-head';
+    const logo = document.createElement('span');
+    logo.className = 'provider-logo';
+    logo.textContent = providerInitial(item.name);
+    const name = document.createElement('strong');
+    name.textContent = item.name;
+    head.append(logo, name);
+    if (item.current) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.dataset.state = 'ok';
+      badge.textContent = '当前';
+      head.appendChild(badge);
+    }
+    card.appendChild(head);
+    for (const text of [
+      `模型：${item.model_id || item.name}`,
+      `地址：${item.base_url || '未设置'}`,
+      `${item.api_key_configured ? 'API Key：已配置' : 'API Key：缺失'}${item.tiers?.length ? ' · 路由：' + item.tiers.join('/') : ''}`,
+    ]) {
+      const line = document.createElement('div');
+      line.className = 'provider-meta';
+      line.textContent = text;
+      card.appendChild(line);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'provider-actions';
+    if (!item.current) {
+      const switchButton = document.createElement('button');
+      switchButton.type = 'button';
+      switchButton.className = 'btn btn-primary';
+      switchButton.textContent = '切换';
+      switchButton.addEventListener('click', () => switchProvider(item.name, true));
+      const defaultButton = document.createElement('button');
+      defaultButton.type = 'button';
+      defaultButton.className = 'btn btn-quiet';
+      defaultButton.textContent = '仅设为默认';
+      defaultButton.addEventListener('click', () => switchProvider(item.name, false));
+      actions.append(switchButton, defaultButton);
+    } else {
+      const currentButton = document.createElement('button');
+      currentButton.type = 'button';
+      currentButton.className = 'btn btn-quiet';
+      currentButton.disabled = true;
+      currentButton.textContent = '当前使用中';
+      actions.appendChild(currentButton);
+    }
+    card.appendChild(actions);
+    list.appendChild(card);
+  }
+  renderPresets();
+}
+
+function providerPresetMatches(preset) {
+  if (providerState.category !== 'all' && preset.category !== providerState.category) return false;
+  const query = providerState.search.trim().toLowerCase();
+  if (!query) return true;
+  const haystack = [
+    preset.id, preset.name, preset.base_url, preset.model,
+    ...(preset.models || []), ...(preset.aliases || []), preset.website, preset.note,
+  ].join(' ').toLowerCase();
+  return haystack.includes(query);
+}
+
+function renderPresets() {
+  const grid = $('provider-presets');
+  grid.replaceChildren();
+  const presets = providerState.presets.filter(providerPresetMatches);
+  if (!presets.length) {
+    const empty = document.createElement('p');
+    empty.className = 'small';
+    empty.textContent = '没有匹配的供应商，试试搜索 kimi、glm、openrouter，或使用“自定义 OpenAI 兼容”。';
+    grid.appendChild(empty);
+    return;
+  }
+  for (const preset of presets) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'preset-card';
+    card.disabled = preset.addable === false;
+    const name = document.createElement('div');
+    name.className = 'name';
+    const logo = document.createElement('span');
+    logo.className = 'provider-logo';
+    logo.textContent = providerInitial(preset.name);
+    const label = document.createElement('span');
+    label.textContent = preset.name;
+    name.append(logo, label);
+    const category = document.createElement('div');
+    category.className = 'small';
+    category.textContent = providerCategoryName(preset.category);
+    const meta = document.createElement('div');
+    meta.className = 'provider-meta';
+    meta.textContent = preset.base_url || '需要填写 Base URL';
+    const model = document.createElement('div');
+    model.className = 'provider-meta';
+    model.textContent = preset.model ? `示例模型：${preset.model}` : preset.note;
+    const state = document.createElement('div');
+    state.className = preset.addable === false ? 'preset-disabled' : 'preset-addable';
+    state.textContent = preset.addable === false ? '账号登录方式，本项目不支持' : '点击添加';
+    card.append(name, category, meta, model, state);
+    if (preset.addable !== false) {
+      card.addEventListener('click', () => openPresetForm(preset));
+    }
+    grid.appendChild(card);
+  }
+}
+
+function openPresetForm(preset) {
+  providerState.preset = preset;
+  const existing = new Set(providerState.configured.map(item => item.name));
+  let name = preset.id;
+  let suffix = 2;
+  while (existing.has(name)) name = `${preset.id}-${suffix++}`;
+  $('preset-name').value = name;
+  $('preset-model').value = preset.model || (preset.models || [])[0] || '';
+  $('preset-base').value = preset.base_url || '';
+  $('preset-key-env').value = preset.api_key_env || '';
+  $('preset-provider').value = [...$('preset-provider').options]
+    .some(option => option.value === preset.provider) ? preset.provider : 'compatible';
+  $('preset-pricing').value = preset.pricing_provider || '';
+  $('preset-set-default').checked = true;
+  $('provider-form-title').textContent = `添加 ${preset.name}`;
+  $('provider-form-note').textContent = preset.note || '模型 ID 为示例值，可按服务商控制台修改。';
+  message('provider-msg', '');
+  $('provider-form').hidden = false;
+  $('provider-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+async function addProvider(event) {
+  event.preventDefault();
+  const submit = $('provider-form').querySelector('button[type="submit"]');
+  const body = {
+    name: $('preset-name').value.trim(),
+    model_id: $('preset-model').value.trim(),
+    base_url: $('preset-base').value.trim(),
+    api_key_env: $('preset-key-env').value.trim(),
+    provider: $('preset-provider').value,
+    pricing_provider: $('preset-pricing').value,
+    set_default: $('preset-set-default').checked,
+  };
+  if (!body.name || !body.model_id || !body.api_key_env) {
+    message('provider-msg', '请填写配置名称、模型 ID 和 API Key 环境变量。', 'error');
+    return;
+  }
+  submit.disabled = true;
+  message('provider-msg', '正在添加…');
+  try {
+    await requestJSON('/models/add', {body});
+    message('provider-msg', '已添加供应商。', 'ok');
+    $('provider-form').hidden = true;
+    providersLoaded = false;
+    configLoaded = false;
+    await loadProviders(true);
+    toast(`已添加 ${body.name}`, 'ok');
+  } catch (error) {
+    message('provider-msg', error.message, 'error');
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function switchProvider(name, single = true) {
+  try {
+    await requestJSON('/api/models/switch', {body: {name, single}});
+    toast(`已切换到 ${name}${single ? '（单模型路由）' : ''}`, 'ok');
+    providersLoaded = false;
+    configLoaded = false;
+    await loadProviders(true);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+$('provider-search').addEventListener('input', event => {
+  providerState.search = event.target.value;
+  renderPresets();
+});
+$('provider-category').addEventListener('change', event => {
+  providerState.category = event.target.value || 'all';
+  renderPresets();
+});
+$('provider-form').addEventListener('submit', addProvider);
+$('provider-form-close').addEventListener('click', () => {
+  $('provider-form').hidden = true;
+  message('provider-msg', '');
+});
 
 openPage(location.hash.slice(1));
 connectStream();

@@ -159,7 +159,8 @@ class OJClient:
     def _extract_images(self, content_raw, page_url: str = "") -> list[str]:
         """从题面原始内容（HTML/Markdown）提取图片 URL，转绝对地址并下载为 base64。
 
-        返回 list[str]：每个元素是 data:image/xxx;base64,<data> 或失败时保留原 URL。
+        返回 list[str]：每个元素是 data:image/xxx;base64,<data>；下载失败的图片会被
+        丢弃，避免把不可访问的 URL 交给模型导致 400。
         支持 <img src=...>、![alt](url)、[![alt](url)](link) 三类形式。
         """
         if isinstance(content_raw, dict):
@@ -192,9 +193,21 @@ class OJClient:
         return self._download_images(urls[:max_images])
 
     def _abs_url(self, url: str, page_url: str = "") -> str:
-        """相对/绝对 URL → 绝对 URL（基于题目页或 OJ 根）"""
+        """相对/绝对 URL → 绝对 URL（基于题目页或 OJ 根）。
+
+        Hydro 题面里的 ``file://name`` 是文件占位符，真实地址形如
+        ``https://host/p/<pid>/file/<name>?type=additional_file``。
+        """
         if url.startswith("http://") or url.startswith("https://") or url.startswith("data:"):
             return url
+        if url.startswith("file://"):
+            name = url[len("file://"):].lstrip("/").split("?", 1)[0]
+            origin = re.match(r'^(https?://[^/]+)', page_url or self.api_base)
+            pid = re.search(r'/p/([^/?#]+)', page_url or "")
+            if name and origin and pid:
+                return (f"{origin.group(1)}/p/{pid.group(1)}/file/{name}"
+                        "?type=additional_file")
+            return ""
         if url.startswith("//"):
             return "https:" + url
         base = page_url or f"{self.api_base}/p/"
@@ -204,9 +217,11 @@ class OJClient:
         return prefix.rstrip("/") + "/" + url.lstrip("/")
 
     def _download_images(self, urls: list[str]) -> list[str]:
-        """下载图片为 base64 data URL。失败时保留原 URL（由 API 服务端抓取）。"""
+        """下载图片为 base64 data URL；失败则跳过，避免无效 URL 导致模型 400。"""
         results = []
         for u in urls:
+            if not u:
+                continue
             if u.startswith("data:"):
                 results.append(u); continue
             try:
@@ -221,7 +236,7 @@ class OJClient:
                 log.warning("    [!] 图片下载失败 %d: %s", r.status_code, u)
             except Exception as e:
                 log.warning("    [!] 图片下载异常 %s: %s", u, e)
-            results.append(u)  # 失败保留原 URL
+            # 不保留原始 URL：不可访问的图片会让多模态请求直接 400。
         return results
 
     # ---- 提交代码 ----

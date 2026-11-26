@@ -279,3 +279,30 @@ fieldset { min-inline-size: 0; border: 0; padding: 0; margin: 0; }
   .bar, .heatmap-cell:not(.l0) { border: 1px solid CanvasText; }
   .nav-tabs button[aria-selected="true"] { border-color: Highlight; }
 }
+
+/* 模型供应商（cc-switch 风格卡片） */
+.provider-layout { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; }
+.provider-side, .provider-main { min-width: 0; }
+.provider-list { display: grid; gap: 10px; }
+.provider-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: grid; gap: 8px; background: var(--surface); }
+.provider-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.provider-card-head { display: flex; align-items: center; gap: 8px; font-weight: 700; min-width: 0; }
+.provider-card-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-logo { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 800; flex: none; }
+.provider-meta { font: 11px/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.provider-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.provider-actions .btn { min-height: 32px; padding: 4px 9px; font-size: 12px; }
+.provider-toolbar { display: flex; gap: 10px; margin-bottom: 14px; }
+.provider-toolbar input { flex: 1; }
+.provider-toolbar select { width: auto; min-width: 150px; }
+.preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.preset-card { text-align: left; border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface); color: var(--ink); display: grid; gap: 6px; cursor: pointer; font: inherit; }
+.preset-card:not(:disabled):hover { border-color: var(--accent); transform: translateY(-1px); }
+.preset-card:disabled { opacity: .5; cursor: not-allowed; }
+.preset-card .name { display: flex; align-items: center; gap: 8px; font-weight: 700; min-width: 0; }
+.preset-card .name span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset-card .small { font-size: 11px; }
+.preset-addable { color: var(--good); font-size: 10px; font-weight: 700; }
+.preset-disabled { color: var(--muted); font-size: 10px; }
+.provider-form { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 16px; }
+@media (max-width: 1050px) { .provider-layout { grid-template-columns: minmax(0, 1fr); } }

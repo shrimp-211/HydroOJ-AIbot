@@ -234,43 +234,46 @@ def main():
 
     def run_check():
         nonlocal processed
+        cfg = c  # 固定外层 ConfigManager，避免被循环变量遮蔽
         log.info("\n" + "─" * 50 + f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] 检查中...")
         pending = check_contests(root, domains, processed, username, password, include_ongoing=include_ongoing,
-                                 start_page=args.start_page or c.contest_start_page)
+                                 start_page=args.start_page or cfg.contest_start_page)
         if not pending: log.info("[*] 无待处理比赛"); return
         log.info("\n[*] 发现 %d 个待处理比赛（%d 线程并发）", len(pending), len(pending))
 
         # 分组展示
         by_domain = {}
-        for c in pending: by_domain.setdefault(c["domain"], []).append(c)
+        for contest in pending:
+            by_domain.setdefault(contest["domain"], []).append(contest)
         for d, clist in by_domain.items():
             log.info("  domain=%s: %d 个比赛", d, len(clist))
 
         # 多线程并发处理
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=min(len(pending), 4)) as pool:
-            futures = {pool.submit(process_contest, c, str(sp), msg_push_list): c for c in pending}
+            futures = {pool.submit(process_contest, contest, str(sp), msg_push_list): contest
+                       for contest in pending}
             for f in as_completed(futures):
-                c = futures[f]
+                contest = futures[f]
                 try:
                     ok = f.result()
                     if ok == "ai_unavailable":
-                        log.warning("[AI] %s 因 AI 不可用跳过，稍后重试", c['title'][:30])
+                        log.warning("[AI] %s 因 AI 不可用跳过，稍后重试", contest['title'][:30])
                         continue
                     if ok:
-                        processed.add(c["cid"]); save_state(state_file, processed)
-                        log.info("[+] 已记录: %s — %s", c['domain'], c['title'][:30])
-                        _push_event("contest_done", f"✅ {c['title'][:30]} 完成")
+                        processed.add(contest["cid"]); save_state(state_file, processed)
+                        log.info("[+] 已记录: %s — %s", contest['domain'], contest['title'][:30])
+                        _push_event("contest_done", f"✅ {contest['title'][:30]} 完成")
                     else:
-                        _push_event("contest_fail", f"⚠️ {c['title'][:30]} 部分未AC")
+                        _push_event("contest_fail", f"⚠️ {contest['title'][:30]} 部分未AC")
                 except Exception as e:
-                    log.error("[-] %s 处理异常: %s", c['title'][:30], e)
+                    log.error("[-] %s 处理异常: %s", contest['title'][:30], e)
             # 标程扫描：处理完比赛后自动生成标程题解
             if processed:
                 log.info("[*] 自动标程题解扫描 ...")
                 sp_bm = str(_script_dir() / "benchmark_solver.py")
                 try:
-                    subprocess.run([sys.executable, sp_bm, "--start-page", str(args.start_page or c.contest_start_page)],
+                    subprocess.run([sys.executable, sp_bm, "--start-page", str(args.start_page or cfg.contest_start_page)],
                                    cwd=str(data_dir(Path(sp_bm).parent)),
                                    env=os.environ.copy(), timeout=600)
                 except Exception:
