@@ -9,7 +9,8 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from openai import OpenAI
+from openai import DefaultHttpxClient, OpenAI
+from hydroai.ai.services import normalize_proxy
 from hydroai.ai.protocol import build_request, extract_usage, provider_for
 from hydroai.ai.context import repair_messages
 from hydroai.config.manager import ConfigManager as Config
@@ -123,11 +124,18 @@ class AIClient:
         base_url, api_key = settings["base_url"], settings["api_key"]
         timeout = float(settings.get("timeout", 180))
         retries = int(settings.get("max_retries", 2))
-        cache_key = (base_url, api_key, timeout, retries)
+        proxy = normalize_proxy(settings.get("proxy") or "")
+        cache_key = (base_url, api_key, timeout, retries, proxy)
         with self._client_lock:  # 多线程求解时避免重复创建/竞态写入
             if cache_key not in self._clients:
-                self._clients[cache_key] = OpenAI(api_key=api_key, base_url=base_url,
-                                                  timeout=timeout, max_retries=retries) if api_key else None
+                client = None
+                if api_key:
+                    kwargs = {}
+                    if proxy:
+                        kwargs["http_client"] = DefaultHttpxClient(proxy=proxy, timeout=timeout)
+                    client = OpenAI(api_key=api_key, base_url=base_url,
+                                    timeout=timeout, max_retries=retries, **kwargs)
+                self._clients[cache_key] = client
             return self._clients[cache_key]
 
     @staticmethod

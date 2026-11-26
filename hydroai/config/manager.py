@@ -1,7 +1,6 @@
 """动态配置管理器 — 类型安全、热重载、线程安全"""
 import os
 import copy
-import json
 import time
 import logging
 import threading
@@ -63,6 +62,8 @@ class AppConfig:
     editorial_enable: bool = True
     editorial_model: str = ""          # 写题解用的模型（空=沿用求解模型）
     editorial_fix_rounds: int = 2      # 校验不通过时的定向修复轮数
+    benchmark_model: str = ""          # 标程扫描模型（空=默认模型）
+    testdata_model: str = ""           # 测试数据补充模型（空=默认模型）
     # Code
     lang: str = "cc.cc14o2"
     # Runtime
@@ -115,6 +116,7 @@ class ConfigManager:
         self._mtime_stat: float = -1.0   # 上次 stat 结果
         self._callbacks: list = []
         self._overrides = dict(cli_overrides or {})
+        self._env_sources: dict[str, str] = {}
         self._load_error = ""
         self._price_catalog = None
         self.reload()
@@ -222,26 +224,30 @@ class ConfigManager:
                 "solve_repairs": ["OJ_SOLVE_REPAIRS"],
                 "editorial_enable": ["OJ_EDITORIAL_ENABLE"],
                 "editorial_model": ["OJ_EDITORIAL_MODEL"],
+                "benchmark_model": ["OJ_BENCHMARK_MODEL"],
+                "testdata_model": ["OJ_TD_MODEL"],
                 "lang": ["OJ_LANG"],
                 "verify_timeout": ["OJ_VERIFY_TIMEOUT", "VERIFY_TIMEOUT"],
             }
+            env_sources = {}
             for field, keys in env_map.items():
-                if isinstance(keys, str): keys = [keys]
                 for key in keys:
-                    if key in os.environ and hasattr(c, field):
-                        val = os.environ[key]
-                        ok, converted = self._coerce(getattr(c, field), val)
-                        if not ok:
-                            continue
+                    if key not in os.environ:
+                        continue
+                    ok, converted = self._coerce(getattr(c, field), os.environ[key])
+                    if ok:
                         setattr(c, field, converted)
+                        env_sources[field] = key
                         break
             for key, value in self._overrides.items():
                 if value is not None and hasattr(c, key):
                     setattr(c, key, copy.deepcopy(value))
+                    env_sources.pop(key, None)
             if c.oj_root != AppConfig.oj_root and c.oj_base == AppConfig.oj_base:
                 c.oj_base = c.oj_root.rstrip("/") + "/d/system"
             self._load_error = ""
             self._config = c
+            self._env_sources = env_sources
             self._mtime = self._stat_mtime()
             self._mtime_stat = self._mtime
             self._mtime_probe = time.monotonic()
@@ -254,20 +260,22 @@ class ConfigManager:
         except OSError:
             return 0.0
 
-    def save(self):
-        """Persist settings while retaining unknown fields and stored credentials.
-
-        Runtime/env credentials are never copied into the file.
-        """
+    def save(self, *fields: str):
+        """保存显式修改的字段；不把环境变量或运行时凭据写回文件。"""
         with self._lock:
             existing = read_config(self._path)
-            values = {key: copy.deepcopy(getattr(self._config, attr))
-                      for attr, key in FIELD_TO_JSON.items()
-                      if attr not in ("password", "ai_api_key")}
-            existing.update(values)
+            selected = fields or FIELD_TO_JSON
+            for attr in selected:
+                if attr not in {"password", "ai_api_key"} and attr not in self._env_sources:
+                    existing[FIELD_TO_JSON[attr]] = copy.deepcopy(getattr(self._config, attr))
             atomic_write_json(self._path, existing)
             self._mtime = self._stat_mtime()
             self._mtime_stat = self._mtime
+
+    def environment_source(self, field: str) -> str | None:
+        """返回控制有效设置的变量名，不返回环境变量值。"""
+        self.cfg  # 确保与最近一次热重载一致。
+        return self._env_sources.get(field)
 
     # ---- 热重载 ----
     def _check_reload(self) -> bool:
@@ -315,39 +323,27 @@ class ConfigManager:
                 if hasattr(self._config, k):
                     setattr(self._config, k, copy.deepcopy(v))
                     self._overrides[k] = copy.deepcopy(v)
+                    self._env_sources.pop(k, None)
 
     def repair(self) -> list[str]:
-        """补齐 config.json 中缺失的字段（用 AppConfig 默认值填充），返回新增的字段列表。"""
-        if not self._path.exists():
-            return []
-        try:
-            with open(self._path, "r", encoding="utf-8") as f:
-                j = json.load(f)
-        except Exception:
-            return []
-        if not isinstance(j, dict):
-            return []
-        added = []
-        c = self.cfg
-        # 敏感字段不落盘（凭据统一由 .env 管理，避免明文写进 config.json）
-        sensitive = {"password", "ai_api_key"}
-        # 由统一的 FIELD_TO_JSON 派生，保证「补齐」与「读取」认为的键名完全一致
-        for attr_name, json_key in FIELD_TO_JSON.items():
-            if attr_name in sensitive:
-                continue
-            if json_key not in j and hasattr(c, attr_name):
-                val = getattr(c, attr_name)
-                j[json_key] = val
-                added.append(json_key)
-
-        if added:
+        """只用默认值补齐旧配置；永远不持久化 CLI 或环境覆盖。"""
+        with self._lock:
+            if not self._path.exists():
+                return []
             try:
-                atomic_write_json(self._path, j)
-                log.info("[配置] 补齐 %d 个缺失字段: %s", len(added), ", ".join(added))
-            except Exception as e:
-                log.warning("[配置] 补齐写入失败: %s", e)
-
-        return added
+                doc = read_config(self._path)
+                defaults = AppConfig()
+                root = doc.get("oj_root", defaults.oj_root)
+                if isinstance(root, str) and root != defaults.oj_root:
+                    defaults.oj_base = root.rstrip("/") + "/d/system"
+                additions = {key: getattr(defaults, attr) for attr, key in FIELD_TO_JSON.items()
+                             if key not in doc and attr not in {"password", "ai_api_key"}}
+                if additions:
+                    atomic_write_json(self._path, {**doc, **additions})
+                return list(additions)
+            except (OSError, ValueError) as exc:
+                log.warning("[配置] 无法补齐文件 (%s)", type(exc).__name__)
+                return []
 
     # ── 配置校验 ──
 
@@ -418,8 +414,8 @@ class ConfigManager:
                 md = {}
             result = dict(
                 base_url=md.get("base_url") or cfg.ai_base_url,
-                api_key=(self._resolve_model_api_key(md["api_key"])
-                         if md.get("api_key") else self.api_key),
+                api_key=(self._resolve_api_key(md["api_key"])
+                         if "api_key" in md else self.api_key),
                 max_tokens=md.get("max_tokens") or cfg.ai_max_tokens,
                 reasoning_effort=md.get("reasoning_effort")
                     if md.get("reasoning_effort") is not None else cfg.ai_reasoning_effort,
@@ -428,19 +424,14 @@ class ConfigManager:
         if isinstance(md, dict):
             for key in ("provider", "token_parameter", "supports_reasoning_effort",
                         "thinking", "extra_body", "stream_usage", "timeout", "max_retries",
-                        "model_id", "models_url", "pricing_provider", "pricing_model"):
+                        "model_id", "models_url", "pricing_provider", "pricing_model",
+                        "proxy"):
                 if key in md and md[key] is not None:
                     result[key] = copy.deepcopy(md[key])
         from hydroai.ai.services import normalize_base_url
         result['base_url'] = normalize_base_url(result['base_url'])
         # Resolve environment references each time so credential rotation takes effect.
         return copy.deepcopy(result)
-
-    def _resolve_model_api_key(self, val) -> str:
-        """解析模型级 api_key：null → 返回空；全大写 → 环境变量引用；含. → 字面值"""
-        if val is None or val == "":
-            return ""
-        return self._resolve_api_key(val)
 
     def get_model_base_url(self, model_name: str) -> str:
         return self.get_model_config(model_name)["base_url"]

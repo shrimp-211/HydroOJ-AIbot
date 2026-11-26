@@ -128,12 +128,10 @@ def test_daemon_child_keeps_persistent_working_directory(tmp_path, monkeypatch):
     assert calls[0][1]['cwd'] == str(tmp_path)
 
 
-def test_web_saves_into_persistent_data_directory(tmp_path, monkeypatch):
-    import hydroai.web.app as webui
+def test_web_saves_into_persistent_data_directory(tmp_path, monkeypatch, auth, web_app):
     monkeypatch.setenv('OJ_DATA_DIR', str(tmp_path))
-    monkeypatch.setattr(webui, 'AUTH_TOKEN', 'test-token')
-    client = webui.app.test_client()
-    response = client.post('/config', headers={'X-Auth-Token': 'test-token'}, json={'contest_start_page': 3})
+    client = auth(web_app.test_client())
+    response = client.post('/config', json={'contest_start_page': 3})
     assert response.status_code == 200
     assert json.loads((tmp_path/'config.json').read_text())['contest_start_page'] == 3
     assert ConfigManager().contest_start_page == 3

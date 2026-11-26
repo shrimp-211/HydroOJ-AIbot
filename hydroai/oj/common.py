@@ -3,6 +3,7 @@ OJ Solver — 共享模块
 提供所有脚本共用的：配置加载、登录、Cookie 管理、日志配置
 """
 
+from hydroai.config.io import load_dotenv, read_config
 from hydroai.config.paths import config_file
 import os
 import re
@@ -239,47 +240,10 @@ def accum_add(pid, cost: float) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════
-# .env 加载
-# ═══════════════════════════════════════════════════════════════
-def load_dotenv(env_path: str | None = None):
-    """加载 .env 文件到 os.environ（已存在的变量不覆盖）。
-
-    支持 `export KEY=value`、行内注释、单双引号包裹的值，以及 Windows 下
-    用记事本保存出的 UTF-8 BOM。
-    """
-    p = Path(env_path) if env_path is not None else config_file(".env")
-    if not p.exists():
-        return
-    with open(p, "r", encoding="utf-8-sig") as f:
-        for line in f:
-            line = line.strip().lstrip("\ufeff")
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):].lstrip()
-            if "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip()
-            # 引号内的 # 属于值本身；未加引号时 # 视为行内注释
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-                val = val[1:-1]
-            else:
-                val = val.split("#", 1)[0].strip()
-                val = val.strip('"').strip("'")
-            if not key:
-                continue
-            if key not in os.environ:
-                os.environ[key] = val
-
-
-# ═══════════════════════════════════════════════════════════════
 # 配置加载
 # ═══════════════════════════════════════════════════════════════
 def load_config(config_path: str | None = None) -> dict:
     """Read the shared config location, including legacy field normalization."""
-    from hydroai.config.io import read_config
     return read_config(config_path if config_path is not None else config_file("config.json"))
 
 

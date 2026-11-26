@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-api-root="{{ url_for('index') }}">
+<html lang="zh-CN" data-api-root="{{ url_for('workspace.index') }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -38,7 +38,12 @@
       <button type="button" role="tab" id="nav-models" aria-controls="tab-models" aria-selected="false" tabindex="-1">{{ icon('sliders') }} <span>模型供应商</span></button>
       <button type="button" role="tab" id="nav-config" aria-controls="tab-config" aria-selected="false" tabindex="-1">{{ icon('sliders') }} <span>配置</span></button>
     </div>
-    <div class="sidebar-footer"><span class="sidebar-footer-mark"></span> HydroAI Web Console · v{{ app_version }}<button type="button" class="btn btn-quiet" style="margin-top:8px;width:100%" onclick="logoutWeb()">退出登录</button></div>
+    <div class="sidebar-footer">
+      <span class="sidebar-footer-mark"></span> HydroAI Web Console · v{{ app_version }}
+      <form action="{{ url_for('workspace.logout') }}" method="post">
+        <button type="submit" class="btn btn-quiet" style="margin-top:8px;width:100%">退出登录</button>
+      </form>
+    </div>
   </aside>
 
   <main class="workspace" id="workspace" tabindex="-1">
@@ -172,6 +177,8 @@
             <div class="card-heading"><div><h2>当前模型</h2><p id="provider-current">加载中…</p></div></div>
             <div class="provider-list" id="configured-models"></div>
             <p class="small mt8" id="provider-active-tiers"></p>
+            <div class="card-heading" style="margin-top:18px"><div><h2>任务模型</h2><p>为不同用途分别指定模型。</p></div></div>
+            <div class="role-list" id="model-roles"></div>
           </aside>
           <div class="card provider-main">
             <div class="card-heading"><div><h2>预置供应商</h2><p>选择预设后填写 API Key 环境变量；模型 ID 可以修改。</p></div></div>
@@ -181,14 +188,19 @@
             </div>
             <div id="provider-presets" class="preset-grid"></div>
             <form id="provider-form" class="provider-form" hidden>
-              <input type="hidden" id="preset-pricing">
               <div class="card-heading"><div><h2 id="provider-form-title">添加供应商</h2><p id="provider-form-note"></p></div><button type="button" class="btn btn-quiet" id="provider-form-close">取消</button></div>
               <div class="fields">
                 <label>配置名称<input id="preset-name" required></label>
-                <label>模型 ID<input id="preset-model" required></label>
-                <label>Base URL<input id="preset-base" placeholder="https://..."></label>
+                <label>模型 ID
+                  <div class="inline-field"><input id="preset-model" required><button type="button" class="btn btn-quiet" id="preset-discover">获取列表</button></div>
+                </label>
+                <label id="preset-model-picker-wrap" hidden>选择模型<select id="preset-model-picker"></select></label>
+                <label>Base URL<input id="preset-base" placeholder="https://..." required></label>
                 <label>API Key 环境变量<input id="preset-key-env" required></label>
+                <label>API Key（可选，保存到配置同目录的 .env）<input id="preset-api-key" type="password" autocomplete="new-password" placeholder="填写后可获取模型列表"></label>
+                <label>代理（可选，仅此模型）<input id="preset-proxy" placeholder="http://127.0.0.1:7890"></label>
                 <label>协议<select id="preset-provider"><option value="compatible">compatible</option><option value="openai">openai</option><option value="deepseek">deepseek</option><option value="zhipu">zhipu</option></select></label>
+                <label>价格目录供应商 ID（可选）<input id="preset-pricing" placeholder="例如 openai、deepseek、zhipuai"></label>
                 <label class="check"><input type="checkbox" id="preset-set-default" checked> 添加后设为当前模型</label>
               </div>
               <div class="btn-group"><button class="btn btn-primary" type="submit">添加供应商</button><span class="msg" id="provider-msg"></span></div>
@@ -200,16 +212,12 @@
       <section id="tab-config" role="tabpanel" aria-labelledby="nav-config" tabindex="0" hidden>
         <header class="page-heading"><div><p class="eyebrow">SETTINGS</p><h1>配置</h1><p>管理 OJ 账户、模型连接及求解策略。</p></div></header>
         <div class="detail-grid">
-          <form class="card full access-card" id="access-form">
-            <div class="card-heading"><div><h2>脚本访问令牌（可选）</h2><p id="access-help">网页登录已改用会话 Cookie；这里仅把 X-Auth-Token 保存到当前浏览器会话，便于脚本/调试调用。</p></div></div>
-            <div class="inline-form"><div><label for="cfg-web-token">API Token</label><input id="cfg-web-token" type="password" autocomplete="off" aria-describedby="access-help"></div><button type="submit" class="btn">应用令牌</button></div>
-          </form>
-
           <form id="config-form" class="full stack">
             <div class="config-toolbar" aria-label="配置操作">
               <div><strong id="config-state">尚未载入</strong><p id="cfg-msg" class="small" role="status" hidden></p></div>
               <div class="btn-group"><button class="btn" id="cfg-reload" type="button">{{ icon('refresh') }} 重新载入</button><button class="btn" id="cfg-diagnose" type="button">检查配置</button><button class="btn btn-primary" id="cfg-save" type="submit" disabled>保存配置</button></div>
             </div>
+            <p id="cfg-env-overrides" class="small" hidden></p>
             <pre id="cfg-diagnostics" class="result" role="status" hidden></pre>
             <fieldset id="config-fields" class="detail-grid" disabled>
               <legend class="sr-only">基本配置</legend>
@@ -227,7 +235,7 @@
                 <div class="fields">
                   <div class="full"><label for="cfg-ai-url">API 地址</label><input id="cfg-ai-url" placeholder="https://api.deepseek.com" spellcheck="false"></div>
                   <div class="full"><label for="cfg-ai-key">API Key <span class="small">（建议填 env:AI_API_KEY）</span></label><input id="cfg-ai-key" type="password" autocomplete="new-password"></div>
-                  <div class="full"><label for="cfg-ai-model">模型</label><input id="cfg-ai-model" spellcheck="false"></div>
+                  <div class="full"><label for="cfg-ai-model">有效模型</label><div class="inline-field"><input id="cfg-ai-model" readonly><button type="button" class="btn" id="manage-models">管理模型连接</button></div></div>
                   <div><label for="cfg-ai-reasoning">推理强度</label><select id="cfg-ai-reasoning"><option value="">不指定</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="max">max</option></select></div>
                   <div><label for="cfg-ai-maxtok">最大输出 Token</label><input id="cfg-ai-maxtok" type="number" min="1"></div>
                 </div>
@@ -266,32 +274,11 @@
           </form>
 
           <details class="card full disclosure">
-            <summary><span><strong>接入模型</strong><small>查询已保存的连接，或新增一个模型别名。</small></span>{{ icon('chevron') }}</summary>
-            <div class="disclosure-body">
-              <div class="inline-form"><div><label for="cfg-model-source">已保存的连接</label><select id="cfg-model-source" disabled><option value="">请先载入配置</option></select></div><button class="btn" type="button" id="model-discover" disabled>查询模型列表</button></div>
-              <p class="small field-help" id="cfg-model-discovery" role="status">查询列表不会生成内容。</p>
-              <form id="model-form">
-                <div class="fields">
-                  <div><label for="new-model-name">配置名称</label><input id="new-model-name" placeholder="例如 fast-model" required></div>
-                  <div><label for="new-model-id">API 模型 ID</label><input id="new-model-id" list="remote-model-ids" required><datalist id="remote-model-ids"></datalist></div>
-                  <div><label for="new-model-url">API 地址</label><input id="new-model-url" placeholder="https://your-api.example/v1" spellcheck="false" required></div>
-                  <div><label for="new-model-key-env">密钥环境变量名</label><input id="new-model-key-env" value="AI_API_KEY" aria-describedby="model-key-help"><p id="model-key-help" class="small field-help">请先在运行环境中设置该变量；只保存引用。</p></div>
-                  <div><label for="new-model-provider">接口类型</label><select id="new-model-provider"><option value="compatible">OpenAI 兼容</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="zhipu">智谱</option></select></div>
-                  <div><label for="new-model-price-provider">价格目录供应商 ID</label><input id="new-model-price-provider" placeholder="例如 openai、deepseek、zhipuai"><p class="small field-help">代理服务需指定。</p></div>
-                  <label class="check full" for="new-model-default"><input id="new-model-default" type="checkbox">设为默认，并切换为此模型的单模型路由</label>
-                </div>
-                <div class="btn-group"><button class="btn btn-primary" type="submit" id="model-add">新增模型连接</button></div>
-                <p id="model-message" class="page-status" role="status" hidden></p>
-              </form>
-            </div>
-          </details>
-
-          <details class="card full disclosure">
             <summary><span><strong>高级配置（JSON）</strong><small>编辑完整配置，包括模型路由与额度。</small></span>{{ icon('chevron') }}</summary>
             <div class="disclosure-body">
               <label for="cfg-advanced-json">配置 JSON</label>
-              <p id="advanced-help" class="small field-help">密钥不会回显。省略密钥字段会保留原值，设为 null 可清空；建议使用 env:NAME。保存时会忽略 *_configured 标记。</p>
-              <textarea id="cfg-advanced-json" rows="14" spellcheck="false" aria-describedby="advanced-help" placeholder="载入安全配置，或粘贴 JSON。"></textarea>
+              <p id="advanced-help" class="small field-help">只显示已保存的值，不包含环境覆盖。省略字段即保留原值；模型 API Key 设为 null 可清空且不继承全局 Key。保存时忽略 *_configured 标记。</p>
+              <textarea id="cfg-advanced-json" rows="14" spellcheck="false" aria-describedby="advanced-help" placeholder="先载入安全配置，再编辑或粘贴 JSON。"></textarea>
               <div class="btn-group"><button type="button" class="btn" id="advanced-load">载入安全配置</button><button type="button" class="btn btn-primary" id="advanced-save">保存高级配置</button></div>
               <p id="cfg-advanced-msg" class="page-status" role="status" hidden></p>
             </div>

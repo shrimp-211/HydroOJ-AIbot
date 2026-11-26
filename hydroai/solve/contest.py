@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """比赛批量解题 — 多线程并行求解，支持多比赛同时处理。"""
 
-from hydroai.config.paths import data_file, project_root
-import os, re, sys, json, time, logging, argparse, threading
-from pathlib import Path
+import argparse
+import json
+import logging
+import os
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from hydroai.oj.common import (load_dotenv, create_session, parse_contest_or_problem,
-                        parse_problem_url, fetch_user_id, smart_login,
-                        RateLimiter, push_oj_message)
+from requests import RequestException
+
 from hydroai.config.manager import ConfigManager
+from hydroai.config.paths import data_file, project_root
+from hydroai.oj.common import (
+    RateLimiter, create_session, fetch_user_id, load_dotenv, parse_contest_or_problem,
+    parse_problem_url, push_oj_message, smart_login,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s.%(msecs)03d %(message)s", datefmt="%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
 
-# 全局限流器实例（延迟模式时启用，复用 oj_common.RateLimiter）
+# 全局 OJ 限流器（延迟模式时启用）
 _oj_limiter = RateLimiter(2.0)
-_ai_limiter = RateLimiter(2.0)
 _delay_mode = False
 _session_lock = threading.Lock()  # 共享 session 线程安全
 _push_session = None  # main() 登录后设为共享主 session
@@ -100,13 +106,14 @@ def _run_supplement(problem_url):
 
 def solve_one(problem_url, cookie_jar, submit, contest_id="", accum=True):
     """求解单道题，返回 {pid, ok, score, is_ac, time_ms, tokens, cost, model, ...}"""
-    from hydroai.solve.solver import Config, OJClient, AIClient, SolverOrchestrator
-    requester = int(os.environ.get("OJ_REQUESTER", 0))
+    from hydroai.ai.client import AIClient
+    from hydroai.oj.client import OJClient
+    from hydroai.solve.solver import SolverOrchestrator
     if _delay_mode:
         _oj_limiter.wait()
     try:
         root, api_base, pid = parse_problem_url(problem_url)
-        config = Config(cli_overrides={"oj_root": root, "oj_base": api_base, "cookie_jar": cookie_jar})
+        config = ConfigManager(cli_overrides={"oj_root": root, "oj_base": api_base, "cookie_jar": cookie_jar})
         oj, ai = OJClient(config), AIClient(config)
         result = SolverOrchestrator(oj, ai, config).solve(
             pid, submit=submit, post=submit, use_stream=False, contest_id=contest_id,
@@ -134,10 +141,78 @@ def solve_one(problem_url, cookie_jar, submit, contest_id="", accum=True):
         return {"pid": "?", "ok": False, "error": str(e)}
 
 
+class ProblemDiscoveryError(RuntimeError):
+    """已识别目标，但未能读取其题目列表。"""
+
+
+def _read_target(session, url):
+    try:
+        response = session.get(url, headers={"Accept": "application/json"}, timeout=15)
+    except RequestException as exc:
+        raise ProblemDiscoveryError(f"请求失败：{type(exc).__name__}") from exc
+    if response.status_code != 200:
+        raise ProblemDiscoveryError(f"HTTP {response.status_code}")
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ProblemDiscoveryError("响应不是有效 JSON") from exc
+    if not isinstance(data, dict):
+        raise ProblemDiscoveryError("响应应为 JSON 对象")
+    return data
+
+
+def discover_problems(session, url, info, *, attend=True):
+    """发现目标题目；读取错误与空列表不同，只读模式不参加比赛。"""
+    base, domain = info["base_url"], info["domain_id"]
+    cid = ""
+    if info["type"] == "problem":
+        title, pids = info["title_prefix"], info["pids"]
+    else:
+        is_contest = info["type"] == "contest"
+        if is_contest:
+            cid = info["contest_id"]
+            if attend:
+                attend_contest(session, base, domain, cid)
+            api_url = f"{base}/d/{domain}/contest/{cid}"
+        else:
+            tid = info["training_id"]
+            api_url = f"{base}/d/{domain}/training/{tid}" if domain != "system" else url
+        data = _read_target(session, api_url)
+        document = data.get("tdoc", {})
+        if not isinstance(document, dict):
+            raise ProblemDiscoveryError("题目列表所属的赛事或训练文档格式无效")
+        title = document.get("title")
+        if not isinstance(title, str) or not title.strip():
+            title = cid if is_contest else tid
+        pids = (document if is_contest else data).get("pids")
+        if not isinstance(pids, list) or not all(type(pid) in (int, str) and str(pid).strip() for pid in pids):
+            raise ProblemDiscoveryError("缺少有效的题目列表（pids）")
+        log.info("[+] %s: %s, pids=%s", "比赛" if is_contest else "训练", title, pids)
+    return ((base, domain, pid, title, cid) for pid in pids)
+
+
+def _for_each_problem(session, urls, visit, *, attend=True) -> bool:
+    all_read = True
+    for url in urls:
+        try:
+            info = parse_contest_or_problem(url)
+            problems = discover_problems(session, url, info, attend=attend)
+        except ValueError as exc:
+            log.error("[-] %s", exc)
+            all_read = False
+            continue
+        except ProblemDiscoveryError as exc:
+            log.error("[-] 读取目标失败: %s（%s）", url, exc)
+            all_read = False
+            continue
+        for problem in problems:
+            visit(*problem)
+    return all_read
+
+
 def main():
     load_dotenv()
     from hydroai.oj.common import setup_logging
-    setup_logging(name="contest_solver")
     parser = argparse.ArgumentParser(description="比赛批量解题（多线程，支持多比赛并行）")
     parser.add_argument("urls", nargs="+", help="比赛或题目链接（可多个）")
     parser.add_argument("--no-submit", action="store_true", help="跳过提交")
@@ -146,17 +221,25 @@ def main():
     parser.add_argument("--no-accum", action="store_true", help="忽略单题金额累计（手动触发时使用）")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if not args.dry_run:
+        setup_logging(name="contest_solver")
 
     cfg = ConfigManager()
-    _no_data_skips = []  # 无数据跳过的题目列表
-    username = os.environ.get("OJ_USERNAME") or cfg.username
-    password = os.environ.get("OJ_PASSWORD") or cfg.password
     root = cfg.oj_root
 
     s = create_session(verify_ssl=False)
     log.info("[*] 登录 OJ ...")
-    if not smart_login(s, root, username, password):
-        log.error("[-] 登录失败"); sys.exit(1)
+    if not smart_login(s, root, cfg.username, cfg.password):
+        log.error("[-] 登录失败")
+        sys.exit(1)
+    if args.dry_run:
+        def preview(base, domain, pid, title, _cid):
+            log.info("[dry-run] %s: %s/d/%s/p/%s", title, base, domain, pid)
+
+        if not _for_each_problem(s, args.urls, preview, attend=False):
+            sys.exit(1)
+        return
+
     user_id = fetch_user_id(s, root)
     if not user_id: log.error("[-] 获取用户 ID 失败"); sys.exit(1)
     log.info("[+] 用户 ID: %d", user_id)
@@ -168,18 +251,6 @@ def main():
     with open(jar, "w", encoding="utf-8") as f:
         json.dump([{"name": c.name, "value": c.value, "domain": c.domain} for c in s.cookies], f)
 
-    # 解析所有 URL
-    contests_info = []
-    for url in args.urls:
-        try:
-            info = parse_contest_or_problem(url)
-            contests_info.append((url, info))
-        except ValueError as e:
-            log.error("[-] %s", e)
-
-    if not contests_info:
-        log.error("[-] 无有效链接"); sys.exit(1)
-
     submit = not args.no_submit
     all_failed = []
 
@@ -188,11 +259,7 @@ def main():
         pending_tasks = []
 
         def enqueue(base: str, domain: str, pid, title: str, cid: str = ""):
-            """题目入队前的统一闸门：查重 → 查测试数据 → 限速判断 → 提交任务。
-
-            原先这段逻辑在「单题 / 训练 / 比赛」三个分支里各写一遍（且细节
-            已出现分叉），改成一处实现，三种入口都走同一条路径。
-            """
+            """单题、训练和比赛共用查重、测试数据检查与入队规则。"""
             problem_url = f"{base}/d/{domain}/p/{pid}"
             if not args.force and has_existing_solution(s, base, domain, pid, user_id):
                 log.info("  #%s — 已有题解，跳过", pid)
@@ -205,7 +272,6 @@ def main():
                     _run_supplement(problem_url)
                 else:
                     log.info("  #%s — 无测试数据，跳过", pid)
-                    _no_data_skips.append(pid)
                     return
             _push(f"🔄 #{pid} 开始", event="problem_start")
             # 任务数一旦达到 20 就立刻开启延迟模式；旧实现等全部入队后才设置，
@@ -215,36 +281,7 @@ def main():
             f = pool.submit(solve_one, problem_url, jar, submit, cid, not args.no_accum)
             pending_tasks.append((f, pid, title))
 
-        for url, info in contests_info:
-            title = info.get("title_prefix") or info.get("contest_id") or info.get("training_id", "?")
-            base, domain = info["base_url"], info["domain_id"]
-            if info["type"] == "problem":
-                for pid in info["pids"]:
-                    enqueue(base, domain, pid, title)
-            elif info["type"] == "training":
-                # 训练：/d/{domain}/training/{id} 或 /training/{id}（system 域）
-                api_url = f"{base}/d/{domain}/training/{info['training_id']}" if domain != "system" else url
-                r = s.get(api_url, headers={"Accept": "application/json"}, timeout=15)
-                if r.status_code != 200: continue
-                data = r.json()
-                tdoc = data.get("tdoc", {})
-                title = tdoc.get("title", info["training_id"])
-                pids = data.get("pids", [])
-                log.info("[+] 训练: %s, pids=%s", title, pids)
-                for pid in pids:
-                    enqueue(base, domain, pid, title)
-            else:
-                # 比赛：先参加+获取pids，再提交任务
-                attend_contest(s, base, domain, info["contest_id"])
-                r = s.get(f"{base}/d/{domain}/contest/{info['contest_id']}",
-                          headers={"Accept": "application/json"}, timeout=15)
-                if r.status_code != 200: continue
-                tdoc = r.json().get("tdoc", {})
-                title = tdoc.get("title", info["contest_id"])
-                pids = tdoc.get("pids", [])
-                cid = info["contest_id"]
-                for pid in pids:
-                    enqueue(base, domain, pid, title, cid)
+        discovery_ok = _for_each_problem(s, args.urls, enqueue)
 
     # 延迟模式兜底：入队过程中可能已提前开启，这里再确认一次
     if len(pending_tasks) >= 20:
@@ -332,7 +369,8 @@ def main():
         if should_notify(cfg, ai_failure_health, channel=channel):
             _push(message, event="ai_unavailable")
         sys.exit(2)
-    if all_failed: sys.exit(1)
+    if all_failed or not discovery_ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

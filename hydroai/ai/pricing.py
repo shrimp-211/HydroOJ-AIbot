@@ -14,7 +14,12 @@ CACHE_VERSION = 1
 
 
 def valid_rate(value):
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def parse_catalog(payload):

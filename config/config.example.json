@@ -258,6 +258,10 @@
   "_editorial_model": "写题解使用的模型（须与 models 段 key 一致）。留空=沿用求解时用的模型；想让题解更漂亮可以指定更强的模型",
   "editorial_fix_rounds": 2,
   "_editorial_fix_rounds": "题解校验不通过时的定向修复轮数（只改被指出的问题）",
+  "benchmark_model": "",
+  "_benchmark_model": "标程扫描使用的模型；留空=默认 ai_model，可用 --model 或 OJ_BENCHMARK_MODEL 覆盖",
+  "testdata_model": "",
+  "_testdata_model": "测试数据补充使用的模型；留空=默认 ai_model，可用 --model 或 OJ_TD_MODEL 覆盖",
   "ai_task_tokens": {
     "default": 16384,
     "solve": 16384,

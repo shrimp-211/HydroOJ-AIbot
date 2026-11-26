@@ -32,11 +32,36 @@ def normalize_base_url(value):
     return urlunsplit((parsed.scheme, parsed.netloc, path, '', ''))
 
 
-def fetch_json(url, *, headers=None, max_bytes=32 * 1024 * 1024):
+def normalize_proxy(value) -> str:
+    """校验逐模型代理；错误不包含代理凭据。"""
+    try:
+        if not isinstance(value, str):
+            raise ValueError
+        value = value.strip()
+        if not value:
+            return ''
+        parsed = urlsplit(value)
+        _ = parsed.port
+        if (parsed.scheme in ('http', 'https', 'socks5', 'socks5h') and parsed.hostname
+                and parsed.path in ('', '/') and not parsed.query and not parsed.fragment):
+            return value
+    except ValueError:
+        pass
+    raise ValueError('代理地址必须是 http(s)://、socks5:// 或 socks5h:// URL')
+
+
+def fetch_json(url, *, headers=None, max_bytes=32 * 1024 * 1024, proxy=None):
     """Bound downloads and do not forward credentials through redirects."""
     try:
-        with requests.get(url, headers=headers or {'Accept': 'application/json'},
-                          timeout=(5, 15), allow_redirects=False, stream=True) as response:
+        options = {
+            'headers': headers or {'Accept': 'application/json'},
+            'timeout': (5, 15),
+            'allow_redirects': False,
+            'stream': True,
+        }
+        if proxy:
+            options['proxies'] = {'http': proxy, 'https': proxy}
+        with requests.get(url, **options) as response:
             if response.status_code != 200:
                 status = response.status_code
                 detail = {401: '认证失败，请检查 API Key', 403: '没有模型列表访问权限',
@@ -81,9 +106,14 @@ def discover_models(settings, *, fetcher=None):
         raise ValueError('API Key 未配置或引用的环境变量不存在')
     fetcher = fetcher or fetch_json
     candidates = models_urls(settings['base_url'], settings.get('models_url', ''))
+    proxy = settings.get('proxy') or ''
     for index, (url, base) in enumerate(candidates):
         try:
-            payload = fetcher(url, headers={'Authorization': 'Bearer ' + key, 'Accept': 'application/json'})
+            kwargs = {'headers': {'Authorization': 'Bearer ' + key,
+                                  'Accept': 'application/json'}}
+            if proxy:
+                kwargs['proxy'] = proxy
+            payload = fetcher(url, **kwargs)
         except ModelServiceError as exc:
             if exc.status in (404, 405) and index + 1 < len(candidates):
                 continue

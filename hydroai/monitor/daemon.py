@@ -110,8 +110,6 @@ def process_contest(contest: dict, solver_path: str, push_list: set = None) -> b
     log.info("\n" + "=" * 60 + f"\n  [处理] {title}\n  URL: {url}\n  题目: {contest['pids']}\n" + "=" * 60)
     _push_event("contest_start", f"▶️ {title[:30]} 开始 ({len(contest['pids'])}题)")
     env = os.environ.copy()
-    env["OJ_USERNAME"] = os.environ.get("OJ_USERNAME", "")
-    env["OJ_PASSWORD"] = os.environ.get("OJ_PASSWORD", "")
     env["OJ_ROOT"] = os.environ.get("OJ_ROOT",
         contest.get("contest_url", "").split("/d/")[0] if "/d/" in contest.get("contest_url","") else "https://oj.yuanyicode.com")
     if push_list:
@@ -148,10 +146,6 @@ def main():
 
     from hydroai.config.manager import ConfigManager
     c = ConfigManager()
-    # 配置完整性检查
-    repaired = c.repair()
-    if repaired:
-        log.info("[配置] 已补齐 %d 个字段: %s", len(repaired), ", ".join(repaired))
     warnings = c.validate()
     if warnings:
         log.warning("[配置] %d 个警告 (详见上方)", len(warnings))
@@ -177,11 +171,10 @@ def main():
         log.info("[*] PID 文件: %s", daemon_control.pid_path())
 
     root = args.root or c.oj_root
-    username = c.username or os.environ.get("OJ_USERNAME", "")
-    password = c.password or os.environ.get("OJ_PASSWORD", "")
+    username, password = c.username, c.password
     include_ongoing = not args.ended_only
     domains = args.domains if args.domains else c.monitor_domains
-    state_file = args.state_file or c.monitor_state_file
+    state_file = str(data_dir() / (args.state_file or c.monitor_state_file))
     interval = args.interval or c.monitor_interval
 
     # 找 contest_solver.py
@@ -219,7 +212,7 @@ def main():
 
     # 推送事件开关（按节点控制）
     # 仪表盘
-    from hydroai.web.dashboard import Dashboard
+    from hydroai.usage.dashboard import Dashboard
     dash = Dashboard()
 
     push_events = c.msg_push_events
@@ -293,11 +286,10 @@ def main():
             finally:
                 _checking = False
         threading.Thread(target=_run_and_clear, daemon=True).start()
-    _schedule_check()
     if args.once:
-        # once 模式下等待检查完成
-        time.sleep(5)
+        run_check()
         return
+    _schedule_check()
     # 交互输入（适配所有终端：TTY/管道/IDE终端）
     has_tty = sys.stdin.isatty()
     if not args.no_interactive:
@@ -341,10 +333,10 @@ def main():
             action, target = parts[1].lower(), parts[2] if len(parts) > 2 else ""
             if action == "add" and target.isdigit():
                 msg_whitelist.add(target); c.set_override(msg_whitelist=[int(x) for x in msg_whitelist])
-                c.save(); return f"✅ 白名单 +{target} (已保存)"
+                c.save("msg_whitelist"); return f"✅ 白名单 +{target} (已保存)"
             if action == "remove" and target.isdigit():
                 msg_whitelist.discard(target); c.set_override(msg_whitelist=[int(x) for x in msg_whitelist])
-                c.save(); return f"✅ 白名单 -{target} (已保存)"
+                c.save("msg_whitelist"); return f"✅ 白名单 -{target} (已保存)"
             if action == "list": return f"👥 白名单: {msg_whitelist}"
             return "格式: whitelist add|remove|list <UID>"
 
@@ -353,10 +345,10 @@ def main():
             action, target = parts[1].lower(), parts[2] if len(parts) > 2 else ""
             if action == "add" and target.isdigit():
                 msg_push_list.add(int(target)); c.set_override(msg_push_list=list(msg_push_list))
-                c.save(); return f"✅ 推送 +{target} (已保存)"
+                c.save("msg_push_list"); return f"✅ 推送 +{target} (已保存)"
             if action == "remove" and target.isdigit():
                 msg_push_list.discard(int(target)); c.set_override(msg_push_list=list(msg_push_list))
-                c.save(); return f"✅ 推送 -{target} (已保存)"
+                c.save("msg_push_list"); return f"✅ 推送 -{target} (已保存)"
             if action == "list": return f"📢 推送名单: {msg_push_list}"
             return "格式: pushlist add|remove|list <UID>"
 

@@ -1,5 +1,6 @@
 .git
 .github
+.planning
 .venv
 __pycache__
 .pytest_cache

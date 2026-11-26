@@ -197,25 +197,22 @@ def test_invalid_pricing_and_connection_config_rejected(patch):
     assert validate_document(patch)
 
 
-def test_web_catalog_auth_and_profile_round_trip(tmp_path, monkeypatch):
-    import hydroai.web.app as webui
+def test_web_catalog_auth_and_profile_round_trip(monkeypatch, auth, web_app):
     import hydroai.ai.services as model_services
-    monkeypatch.setattr(webui, 'ROOT', tmp_path)
-    monkeypatch.setattr(webui, 'AUTH_TOKEN', 'access')
     monkeypatch.delenv('OJ_DATA_DIR', raising=False)
     monkeypatch.setenv('AI_API_KEY', 'secret')
-    client = webui.app.test_client()
+    client = web_app.test_client()
     for url in ('/models/discover','/models/add','/pricing/refresh'):
         assert client.post(url, json={}).status_code == 403
-    headers = {'X-Auth-Token':'access'}
-    response = client.post('/models/add', headers=headers, json={'name':'alias', 'model_id':'wire',
+    auth(client)
+    response = client.post('/models/add', json={'name':'alias', 'model_id':'wire',
         'base_url':'https://test.invalid/v1', 'set_default':True})
     assert response.status_code == 200
     monkeypatch.setattr(model_services, 'fetch_json', lambda *a, **kw:{'data':[{'id':'wire'}]})
-    response = client.post('/models/discover', headers=headers, json={'model':'alias'})
+    response = client.post('/models/discover', json={'model':'alias'})
     assert response.json['models'] == [{'id':'wire','owned_by':''}]
     assert 'secret' not in response.get_data(as_text=True)
-    assert client.get('/pricing', headers=headers).status_code == 200
+    assert client.get('/pricing').status_code == 200
 
 @pytest.mark.parametrize('stream', [False, True])
 def test_alias_keeps_its_connection_and_stream_settings(tmp_path, monkeypatch, stream):

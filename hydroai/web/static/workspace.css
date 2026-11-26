@@ -67,7 +67,7 @@
 body { margin: 0; min-width: 0; background: var(--page); color: var(--ink); font: 400 14px/1.55 var(--font); }
 h1, h2, p, pre, ul { margin: 0; }
 button, input, textarea, select { font: inherit; }
-button { cursor: pointer; }
+button { cursor: pointer; touch-action: manipulation; }
 button:disabled { cursor: not-allowed; opacity: .5; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -306,3 +306,11 @@ fieldset { min-inline-size: 0; border: 0; padding: 0; margin: 0; }
 .preset-disabled { color: var(--muted); font-size: 10px; }
 .provider-form { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 16px; }
 @media (max-width: 1050px) { .provider-layout { grid-template-columns: minmax(0, 1fr); } }
+.role-list { display: grid; gap: 10px; }
+.role-row { display: grid; gap: 4px; }
+.role-row .role-label { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 650; }
+.role-row .role-hint { font-size: 10px; color: var(--muted); font-weight: 400; }
+.role-row select { min-height: 36px; font-size: 12px; }
+.inline-field { display: flex; gap: 6px; align-items: center; }
+.inline-field input { flex: 1; min-width: 0; }
+.inline-field .btn { flex: none; min-height: 42px; white-space: nowrap; }

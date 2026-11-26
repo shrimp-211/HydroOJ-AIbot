@@ -185,6 +185,18 @@ KMP,Manacher,AC自动机,后缀数组,后缀自动机,扩展KMP
             return 0
         return max(0, min(idx, len(self.tiers) - 1))
 
+    def escalation_plan(self, start: int) -> list[tuple[int, ModelTier]]:
+        """保留层级顺序，跳过模型和推理档位都相同的重复尝试。"""
+        plan = []
+        seen = set()
+        for index in range(self.clamp_index(start), len(self.tiers)):
+            tier = self.tiers[index]
+            key = tier.model, tuple(tier.thinking)
+            if key not in seen:
+                seen.add(key)
+                plan.append((index, tier))
+        return plan
+
     def tier_index_for_model(self, model_name: str) -> int | None:
         """查找某个模型所在的层级索引，不在分层里返回 None。
 

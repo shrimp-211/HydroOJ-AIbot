@@ -1,6 +1,6 @@
 # HydroOJ AIbot
 
-**当前版本：2.2.0**
+**当前版本：2.3.0**
 
 为 Hydro OJ 提供 AI 解题、比赛监控、标程题解生成与测试数据补充。支持多模型路由、本地编译与对拍、结构化题解、token / 费用统计，以及 Web 配置和统计页面。
 
@@ -14,7 +14,7 @@
 | 标程题解 | `benchmark_solver.py` | 扫描指定用户的满分提交，解读代码并发布 |
 | 测试数据补充 | `testdata_supplement.py` | 为缺数据题目生成样例、标程和生成器 |
 | 配置初始化 / 诊断 | `config_cli.py` | 生成单模型配置，离线检查参数与密钥引用 |
-| Web 面板 | `webui.py` | Token 登录、配置、模型供应商、统计与运行日志 |
+| Web 面板 | `webui.py` | 账号密码登录、配置、模型供应商、统计与运行日志 |
 | OneBot 接入 | `onebot_server.py` | 接收消息指令并调用求解脚本 |
 
 所有命令请在项目目录运行。Docker 已设置独立的数据目录，无需手动管理工作路径。
@@ -26,17 +26,20 @@
 ```text
 config/     用户配置：config.json、.env 及模板
 hydroai/
-  config/   配置加载、校验、CLI、运行时路径
+  config/   配置来源与校验、模型生命周期、离线诊断
+  cli/      容器命令分发
   ai/       AI 客户端、协议、路由、定价、提示词
-  oj/       OJ 站点交互、样例解析、本地评测
+  oj/       HydroOJ 客户端、目录与样例解析、本地评测
   solve/    单题/比赛求解、Agent、题解、测试数据
   monitor/  比赛守护、私信、OneBot
-  usage/    usage.db 逐请求统计与订阅额度
-  web/      Web 面板、仪表盘、模板
+  usage/    请求账本、订阅额度、任务状态与历史
+  web/      管理面板、会话鉴权、子进程和实时日志
 tests/      离线测试（由 pytest.ini 指定 pythonpath）
 ```
 
 `oj_solver.py`、`contest_solver.py`、`contest_daemon.py`、`webui.py`、`config_cli.py` 等根目录脚本只是入口包装，原有命令保持不变。本地默认从 `config/` 读取 `config.json` 与 `.env`，并兼容旧根目录文件；`model_prices.json` 跟随配置文件目录。运行数据（`dashboard.json`、`usage.db`、`daemon.pid`、`cost_accum.json`、Cookie、日志）仍写入 `OJ_DATA_DIR` 或当前工作目录。Docker 中 `OJ_DATA_DIR=/data`，`config.json` 与运行数据在持久化卷内；`.env` 由宿主机 `config/.env` 注入。
+
+入口先加载配置。求解工作流调用 `oj` 获取题面、提交和本地验证，调用 `ai` 生成并记录用量；守护和 Web 启动同一套命令，不各自实现求解。CLI 和 Web 共用配置诊断及模型规则；Web 只负责授权、操作界面、运行控制和统计展示。
 
 ## 本地安装
 
@@ -104,9 +107,9 @@ cp config/.env.docker.example config/.env
 Copy-Item config/.env.docker.example config/.env
 ```
 
-填写 `config/.env` 的 `OJ_USERNAME`、`OJ_PASSWORD`、`AI_API_KEY`、`WEBUI_AUTH_TOKEN`。
-`WEBUI_AUTH_TOKEN` 请设置为自行生成的随机字符串；Compose 会拒绝使用空令牌启动。
-已有 `config/.env` 时保留它并补充 `WEBUI_AUTH_TOKEN`，不要用模板覆盖凭据。
+填写 `config/.env` 的 `OJ_USERNAME`、`OJ_PASSWORD`、`AI_API_KEY`、`WEBUI_PASSWORD`。
+`WEBUI_PASSWORD` 请设置为自行生成的随机字符串，`WEBUI_USERNAME` 默认为 `admin`；Compose 会拒绝使用空密码启动。
+已有 `config/.env` 时保留它并补充 `WEBUI_USERNAME` / `WEBUI_PASSWORD`，不要用模板覆盖凭据。
 
 ```bash
 docker compose --env-file config/.env build
@@ -115,8 +118,8 @@ docker compose --env-file config/.env run --rm cli doctor
 docker compose --env-file config/.env up -d web
 ```
 
-打开 [http://127.0.0.1:5000](http://127.0.0.1:5000) 会强制跳转登录页，输入 `config/.env` 的 `WEBUI_AUTH_TOKEN` 后才能使用 Web。登录使用 HttpOnly 会话 Cookie；配置页的「脚本访问令牌」只用于保存 `X-Auth-Token` 供脚本调试。
-`config/.env` 的 `WEBUI_PORT` 可修改宿主机端口，例如 `WEBUI_PORT=8080`。可选设置 `WEBUI_SECRET_KEY`（固定会话密钥，重启后仍保持登录）和 `WEBUI_COOKIE_SECURE=1`（HTTPS 反向代理时启用 Secure Cookie）。
+打开 [http://127.0.0.1:5000](http://127.0.0.1:5000) 会强制跳转登录页，输入 `config/.env` 的 `WEBUI_USERNAME` / `WEBUI_PASSWORD` 后才能使用 Web。登录态仅保存在 HttpOnly 会话 Cookie 中，没有额外的请求头令牌或脚本令牌。
+`config/.env` 的 `WEBUI_PORT` 可修改宿主机端口，例如 `WEBUI_PORT=8080`。可选设置 `WEBUI_SECRET_KEY`（固定会话密钥，重启后仍保持登录）和 `WEBUI_COOKIE_SECURE=1`（HTTPS 反向代理时启用 Secure Cookie）。写操作只接受同源浏览器请求；HTTPS 反向代理需保留浏览器访问的 `Host`（含非默认端口）和来源请求头。
 
 Web 与守护进程运行在**同一个容器**中，不再有单独的 daemon 服务。Web 默认随启动自动拉起守护进程（`WEBUI_AUTOSTART_DAEMON=1`），可在「比赛守护」卡片停止、重启或执行一次检查。
 
@@ -166,7 +169,7 @@ docker compose --env-file config/.env run --rm cli solve --help
 
 ```text
 ghcr.io/shrimp-211/hydrooj-aibot:latest
-ghcr.io/shrimp-211/hydrooj-aibot:v2.2.0
+ghcr.io/shrimp-211/hydrooj-aibot:v2.3.0
 ghcr.io/shrimp-211/hydrooj-aibot:<commit-sha>
 ghcr.io/shrimp-211/hydrooj-aibot:<tag>      # push v* 标签时
 ```
@@ -276,7 +279,7 @@ Web 配置页的「监控守护 → 比赛列表起始页」可直接修改 JSON
 
 ### 配置优先级与凭据
 
-命令行 / 运行时覆盖 > 环境变量 > JSON > 默认值。命令行覆盖在热重载后仍有效；JSON 解析失败时保留上一份有效配置。
+命令行 / 运行时覆盖 > 环境变量 > JSON > 默认值。命令行覆盖在热重载后仍有效；JSON 解析失败时保留上一份有效配置。任务启动不会把临时覆盖值写回 JSON；显式配置的 `model_router.tiers` 优先于旧版的 `AI_MODEL_FLASH` / `AI_MODEL_PRO` / `AI_MODEL_MAX` 回退。
 模型独立字段覆盖全局 AI 默认值。默认读当前工作目录的配置；`OJ_DATA_DIR` 可指定独立数据目录，Docker 固定为 `/data`。
 
 推荐在 JSON 中引用环境变量，不直接保存密钥：
@@ -323,7 +326,7 @@ python config_cli.py add-model fast --model-id YOUR_API_MODEL_ID --base-url http
 先在 `config/.env` 设置 `MY_PROVIDER_KEY`；Docker 需要将新增变量注入容器后重新创建服务。
 `fast` 是本地配置别名，`model_id` 是真正发给 API 的模型 ID。重复配置名会被拒绝，原连接不会被覆盖。
 加入 `--set-default` 会将它设为默认，并切换为该模型的单模型路由；需要多模型时继续配置 `model_router.tiers`。
-Web 的「配置 → 接入模型」提供相同流程：选择已有连接获取列表，再填写别名、模型 ID、地址及密钥变量名。
+Web 统一从「模型供应商」页接入模型。可选预设添加，或在已有连接上点「查询模型」，再指定新别名、模型 ID、地址和密钥变量名。
 
 模型列表不保证其中每个模型都支持 Chat Completions。当前仍只支持该兼容协议；Anthropic Messages / Gemini 原生协议、OAuth 订阅接入未包含在此功能中。
 
@@ -391,9 +394,9 @@ python config_cli.py quota             # 额度与余额
 python config_cli.py quota --refresh   # 强制刷新远端余额（忽略缓存）
 ```
 
-Web 面板的「用量与额度」页展示概览卡片、额度进度与重置倒计时、每日趋势、全年热力图、按模型/供应商/任务分布和最近请求。配置页底部提供「高级配置（JSON）」，可编辑包括 `quotas` 在内的全部字段；密钥不会回显，省略 `api_key` 会保留原值，设为 `null` 清除，`*_configured` 标记在保存时自动忽略。私信/控制台可用 `usage` / `用量`、`quota` / `额度`。
+Web 面板的「用量与额度」页展示概览卡片、额度进度与重置倒计时、每日趋势、全年热力图、按模型/供应商/任务分布和最近请求。配置页底部提供「高级配置（JSON）」，编辑持久化字段（包括 `quotas`）；基本表单展示有效值并标出环境覆盖。配置版本更新后，旧草稿不能直接保存，需重新载入合并。密钥不会回显；省略 `api_key` 保留原值，模型的 `api_key` 设为 `null` 不再使用该模型的密钥或回退到全局密钥；保存时忽略 `*_configured` 标记。私信/控制台可用 `usage` / `用量`、`quota` / `额度`。
 
-Web API 鉴权：Web 页面先通过登录页换取 HttpOnly 会话 Cookie；脚本调用需携带 `X-Auth-Token`。`/config`、`/run/*`、`/daemon/*`、`/api/usage/*`、`/api/quota`、`/api/stats`、`/api/today`、`/api/history`、`/history` 均要求鉴权，未设置 `WEBUI_AUTH_TOKEN` 时 Web 进程拒绝启动。`/status` 保持公开供容器健康检查，`/api/version` 公开返回版本号。`/stream` 由前端先申请 60 秒短时票据再连接，避免把长期 Token 放进 URL。
+Web API 鉴权：所有受保护接口只接受登录后获得的 HttpOnly 会话 Cookie，`X-Auth-Token` 请求头与脚本令牌均已移除。`/config`、`/run/*`、`/daemon/*`、`/api/usage/*`、`/api/quota`、`/api/stats`、`/api/today`、`/api/history`、`/history` 均要求登录，未设置 `WEBUI_PASSWORD` 时 Web 进程拒绝启动。`/status` 保持公开供容器健康检查，`/api/version` 公开返回版本号。`/stream` 与页面同源，直接复用登录会话 Cookie。脚本调用可先 `POST /login`（表单字段 `username`、`password`）保存 Cookie，再携带该 Cookie 请求接口。
 
 ```json
 {
@@ -435,10 +438,16 @@ Web 的「模型供应商」页采用 cc-switch 风格布局：左侧显示当�
 
 - 内置 50+ 预设，覆盖 OpenAI、Anthropic 兼容端点、Gemini 兼容端点、DeepSeek、智谱、Kimi、MiniMax、Qwen、千帆、混元、火山方舟、StepFun、MiMo、OpenRouter、SiliconFlow、Novita、Groq、Mistral、xAI、Ollama、LM Studio、New API、Sub2API 等。
 - 选择预设后填写配置名称、模型 ID、Base URL 与 API Key 环境变量；密钥只保存为 `env:NAME` 引用，实际值放在 `config/.env`。
-- 「切换」会把 `ai_model` 与 `model_router.tiers` 全部指向该模型（单模型路由）；「仅设为默认」只改 `ai_model`。
+- 表单可直接填写 API Key 后点击「获取列表」，从供应商 `/models` 返回结果中选择模型；Key 仅在连接校验通过后写入与配置文件同目录的 `.env`，不会写进 `config.json`；同名变量已有不同内容时，请换一个变量名。
+- 添加时只以**名称唯一**作为重复校验；重名会直接提示，不会自动改名。API 地址/模型 ID/Key 变量仍需有效，确保连接可用。
+- 「切换」会把 `ai_model` 与 `model_router.tiers` 全部指向该模型（单模型路由）；「仅设为默认」只改 `ai_model`。环境变量若固定了不兼容的默认模型或用途，会提示冲突而不是报告切换成功。
+- 「任务模型」可为默认模型、Flash/Pro/Max 路由、题解生成、视觉题面、难度检测备用、标程扫描、测试数据补充分别指定模型；可选用途留空表示跟随默认/自动。
+- 已接入模型可删除，但当前默认模型、以及仍被任一任务用途引用的模型会被阻止；请先切换用途。
 - 预置模型 ID 是示例值，以供应商控制台为准，可随时修改。
-- Claude Code / ChatGPT Codex / Gemini / Copilot / Grok 订阅属于 OAuth 账号登录，本项目使用 API Key + Chat Completions，不接入这些账号方式；对应卡片仅作分类展示。
-- API：`GET /api/providers` 返回预设与已接入模型，`POST /api/models/switch` 切换当前模型。
+- 官方订阅：提供「官方订阅（本地 OAuth 网关）」预设，先运行 cc-switch 等支持 OAuth 的本地网关，再把 Base URL/模型改成网关实际值；本项目通过其 OpenAI 兼容端点调用。Claude Code / ChatGPT Codex / Gemini / Copilot / Grok 的 OAuth 账号直连（含令牌刷新与原生协议）目前未内置，账号卡片仅作分类展示。
+- 每个模型可单独配置 `proxy`（HTTP(S)/SOCKS5），只影响该模型的 AI 调用与模型列表获取，不影响其他模型。
+- Web 添加的 API Key 写入配置文件同目录的 `.env`（Docker 为 `/data/.env`）：当前 Web 进程立即生效，已经运行的守护进程需要重启后才会继承新环境变量。
+- API：`GET /api/providers` 返回预设、已接入模型与任务角色，`POST /api/models/switch` 切换当前模型，`POST /api/models/role` 设置用途模型，`POST /api/models/delete` 删除模型。
 
 ### 模型协议参数
 
@@ -458,6 +467,7 @@ Web 的「模型供应商」页采用 cc-switch 风格布局：左侧显示当�
 | `extra_body` | 供应商扩展字段；不能覆盖模型、消息、流式开关或输出上限 |
 | `timeout` / `max_retries` | SDK 超时与重试，默认 180 秒 / 2 次 |
 | `vision` | 是否支持题面图片输入 |
+| `proxy` | 仅该模型使用的 HTTP(S)/SOCKS5 代理，例如 `http://127.0.0.1:7890` |
 | `pricing` | 每百万 token 的 input / output / cache_hit 价格，支持峰谷价 |
 
 DeepSeek / 智谱官方端点保留旧配置的 thinking 默认行为。代理端点应显式声明能力。
@@ -505,7 +515,7 @@ DeepSeek / 智谱官方端点保留旧配置的 thinking 默认行为。代理�
 
 `ttl=0` 表示每次触发都重新检查；失败原因只包含额度项/模型名、异常类型和 HTTP 状态，不输出 Key、URL 或响应正文。`--dry-run` 不调用 AI，不会触发。
 
-Web 的「比赛守护」卡片可启动、停止或执行一次检查。守护进程把 PID 写入数据目录的 `daemon.pid`，因此 Web 重启后仍能识别并停止此前启动的守护进程；`/status` 同时返回 `daemon_running` 与 `daemon_pid`。启动失败会在任务消息和实时控制台中显示退出码。Docker 中 Web 与守护进程共用一个容器，默认自动启动守护进程。
+Web 的「比赛守护」卡片可启动、停止或执行一次检查。守护进程把 PID 写入数据目录的 `daemon.pid`，因此 Web 重启后仍能识别并停止此前启动的守护进程；`/status` 同时返回 `daemon_running` 与 `daemon_pid`。启动失败会在任务消息和实时控制台中显示退出码。Docker 中 Web 与守护进程共用一个容器，默认自动启动守护进程。单次检查会等到扫描及本轮任务完成；变更监控域、频率或登录信息后重启守护。多个页面可各自接收实时日志，重连时从上次接收位置继续。
 
 ### 多模型与难度路由
 
@@ -550,7 +560,7 @@ python oj_solver.py 1000 --no-difficulty-detect
 python oj_solver.py 1000 --difficulty-skip-model YOUR_MODEL
 
 # 比赛或训练；手动任务可显式忽略长期累计费用
-python contest_solver.py https://your-oj.example/contest/CONTEST_ID --workers 2
+python contest_solver.py https://your-oj.example/d/system/contest/CONTEST_ID --workers 2
 python contest_solver.py https://your-oj.example/training/TRAINING_ID --no-accum
 
 # 定时监控 / 仅检查一次
@@ -563,13 +573,13 @@ python benchmark_solver.py https://your-oj.example/record/RECORD_ID
 python testdata_supplement.py https://your-oj.example/p/1000
 
 # Web 管理与离线诊断
-python webui.py --port 5000 --auth-token YOUR_WEB_TOKEN
+python webui.py --port 5000 --username admin --password YOUR_WEB_PASSWORD
 python config_cli.py doctor --json
 ```
 
-WebUI 强制 Token 登录：启动前必须设置 `WEBUI_AUTH_TOKEN` 或传入 `--auth-token`，否则进程拒绝启动；打开页面后先输入 Token。Docker 部署由 Compose 强制要求 `config/.env` 中的 `WEBUI_AUTH_TOKEN`。
+WebUI 强制登录：启动前必须设置 `WEBUI_PASSWORD` 或传入 `--password`，否则进程拒绝启动；用户名由 `WEBUI_USERNAME`（或 `--username`）配置，默认 `admin`。Docker 部署由 Compose 强制要求 `config/.env` 中的 `WEBUI_PASSWORD`。
 
-`--no-submit` 仍可能调用 AI；`--dry-run` 才是仅抓取题面。更多选项可运行对应脚本的 `--help`。
+`--no-submit` 仍可能调用 AI；单题 `--dry-run` 只抓题面，批处理 `--dry-run` 只列出题目，不参赛、不补数据、不启动求解。批处理遇到无法解析或读取的目标时会继续处理其余目标，最后返回非零退出码；成功读取的空题目列表不算失败。更多选项可运行对应脚本的 `--help`。
 
 守护进程的控制台 / OJ 私信支持：
 
@@ -596,7 +606,7 @@ WebUI 强制 Token 登录：启动前必须设置 `WEBUI_AUTH_TOKEN` 或传入 `
 | 没有扫描到比赛 | 默认起始页为 2；先试 `--start-page 1`，再检查域名、登录权限及处理记录 |
 | API Key 缺失 | 运行 doctor；检查模型引用的环境变量，不会自动改用其他服务的密钥 |
 | 修改 Web 配置不生效 | 环境变量优先于 JSON，模型独立配置优先于全局字段；容器环境变量修改后需重新创建 |
-| 无法登录 / API 返回 403 | 在登录页输入 `config/.env` 的 `WEBUI_AUTH_TOKEN`；脚本请求携带 `X-Auth-Token`；未配置 Token 时 Web 会拒绝启动 |
+| 无法登录 / API 返回 403 | 在登录页输入 `config/.env` 的 `WEBUI_USERNAME` / `WEBUI_PASSWORD`；脚本先登录并保存会话 Cookie；未配置密码时 Web 会拒绝启动 |
 | 回复达到长度上限 | 调高对应任务预算和模型上限，检查推理 token 是否占用输出额度 |
 | 不支持某个请求参数 | 调整 provider、token_parameter、supports_reasoning_effort、thinking 或 stream_usage |
 | 缺少本地工具链 | 本地安装 g++ / clang++，或使用内置 g++ 的 Docker 镜像 |
@@ -608,6 +618,9 @@ WebUI 强制 Token 登录：启动前必须设置 `WEBUI_AUTH_TOKEN` 或传入 `
 ```bash
 python -m pytest -q
 python -m pytest tests/test_ai_client.py tests/test_configuration.py tests/test_token_budgets.py -q
+node --check hydroai/web/static/workspace.js
+# 可选：Node.js 22+、本机 Edge 或 Chromium、真实 Web 进程和本地模拟 OJ/AI
+node tests/browser-smoke.mjs "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
 ```
 
 `pytest.ini` 已设置 `testpaths = tests` 和 `pythonpath = .`。测试使用模拟 AI/OJ，不需要真实凭据；缺少编译器时相关本地编译测试自动跳过。
@@ -617,14 +630,15 @@ GitHub Actions 覆盖 Windows / Linux、Python 3.10 / 3.12，并实际构建 Doc
 | --- | --- |
 | `hydroai/ai/client.py` / `protocol.py` | AI 请求、流式处理、供应商参数和计费 |
 | `hydroai/ai/context.py` / `prompts.py` / `prompts.json` | 修复上下文与提示词 |
-| `hydroai/config/manager.py` / `io.py` / `cli.py` | 配置合并、热重载、验证、脱敏、初始化 |
+| `hydroai/config/manager.py` / `io.py` / `models.py` | 配置来源、热重载、校验脱敏和模型生命周期 |
 | `hydroai/ai/services.py` / `pricing.py` | 模型列表发现、地址归一化、价格目录缓存与汇率换算 |
 | `hydroai/oj/catalog.py` | 守护进程和标程扫描共用的比赛分页 |
 | `hydroai/config/paths.py` / `hydroai/cli/entrypoint.py` | 运行数据路径与容器命令 |
 | `hydroai/solve/solver.py` / `agent.py` / `hydroai/oj/judge.py` | 求解编排、候选方案和本地评测 |
 | `hydroai/solve/editorial.py` / `hydroai/oj/samples.py` | 题解校验与样例提取 |
-| `hydroai/oj/common.py` / `hydroai/web/dashboard.py` / `hydroai/monitor/messaging.py` | OJ 会话、仪表盘和消息 |
+| `hydroai/oj/client.py` / `common.py` | 共用的 HydroOJ 访问、题目、评测接口与会话 |
+| `hydroai/usage/dashboard.py` / `hydroai/monitor/messaging.py` | 共用的任务统计与消息 |
 | `hydroai/usage/store.py` / `quota.py` | 逐请求 token/费用账本、订阅额度与余额 |
-| `hydroai/web/app.py` / `templates/` | Web 面板与用量/额度 API |
+| `hydroai/web/app.py` / `settings.py` / `runtime.py` / `reports.py` | Flask 组装和授权、配置路由、任务与 SSE、统计 API |
 
 根目录的入口脚本只负责调用 `hydroai.*` 的 `main()`。内部模块请直接 `from hydroai.<包>.<模块> import ...`。许可证见 [LICENSE](LICENSE)。

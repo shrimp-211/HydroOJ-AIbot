@@ -247,6 +247,17 @@ class TestModelConfig:
         strat = r.solve_strategy(4, 0)
         assert strat[0] == "deepseek-v4-pro"  # diff 4 → pro tier
 
+    def test_escalation_deduplicates_same_model_and_keeps_distinct_thinking(self):
+        from hydroai.ai.router import ModelRouter, ModelTier
+
+        router = ModelRouter()
+        router.tiers = [ModelTier('flash', 'm', ['low']), ModelTier('pro', 'm', ['low']),
+                        ModelTier('max', 'm', ['high'])]
+        assert [(i, tier.name) for i, tier in router.escalation_plan(0)] == [(0, 'flash'), (2, 'max')]
+        assert [(i, tier.name) for i, tier in router.escalation_plan(1)] == [(1, 'pro'), (2, 'max')]
+        router.tiers[-1].thinking = ['low']
+        assert len(router.escalation_plan(0)) == 1
+
     def test_get_model_base_url(self):
         from hydroai.config.manager import ConfigManager
         c = ConfigManager(config_path=str(Path(__file__).resolve().parents[1] / "config" / "config.example.json"))

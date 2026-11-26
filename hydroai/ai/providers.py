@@ -243,6 +243,11 @@ PRESETS = [
             base_url="", api_key_env="ONEAPI_API_KEY", models=["gpt-4.1"],
             website="https://github.com/songquanpeng/one-api",
             note="填写站点根地址（OpenAI 兼容 /v1）。"),
+    _preset(id="oauth-gateway", name="官方订阅（本地 OAuth 网关）", category="relay",
+            base_url="http://127.0.0.1:15721/v1", api_key_env="OAUTH_GATEWAY_API_KEY",
+            models=["claude-sonnet-4-5", "gpt-5.2"],
+            website="", note="先运行支持官方账号 OAuth 的本地网关（如 cc-switch 路由），"
+            "把地址/模型改成网关实际值；本项目通过其 OpenAI 兼容端点调用。"),
     _preset(id="custom", name="自定义 OpenAI 兼容", category="relay",
             base_url="", api_key_env="CUSTOM_API_KEY", models=["YOUR_MODEL_ID"],
             website="", note="手动填写 Base URL、模型 ID 与 API Key 环境变量。"),

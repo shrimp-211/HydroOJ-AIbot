@@ -108,19 +108,17 @@ def test_invalid_config_diagnostics(data):
 
 
 @pytest.fixture
-def web(tmp_path, monkeypatch):
-    import hydroai.web.app as webui
-    monkeypatch.setattr(webui, 'ROOT', tmp_path)
-    monkeypatch.setattr(webui, 'AUTH_TOKEN', 'access')
-    return webui.app.test_client(), tmp_path / 'config.json'
+def web(tmp_path, web_app):
+    return web_app.test_client(), tmp_path / 'config.json'
 
 
-def test_web_config_requires_auth_and_redacts_nested_keys(web):
+def test_web_config_requires_auth_and_redacts_nested_keys(web, auth):
     client, path = web
     write(path, {'password': 'secret-pass', 'ai_api_key': 'sk-secret',
                  'models': {'m': {'api_key': 'sk-model', 'extra_body': {'authorization': 'secret-header'}}}})
     assert client.get('/config').status_code == 403
-    response = client.get('/config', headers={'X-Auth-Token': 'access'})
+    auth(client)
+    response = client.get('/config')
     assert response.status_code == 200
     text = response.get_data(as_text=True)
     for secret in ['secret-pass', 'sk-secret', 'sk-model', 'secret-header']:
@@ -129,11 +127,11 @@ def test_web_config_requires_auth_and_redacts_nested_keys(web):
     assert response.json['models']['m']['api_key_configured']
 
 
-def test_web_flat_and_legacy_writes_reach_runtime(web):
+def test_web_flat_and_legacy_writes_reach_runtime(web, auth):
     client, path = web
-    headers = {'X-Auth-Token': 'access'}
+    auth(client)
     write(path, {'ai_api_key': 'env:KEEP_KEY', 'models': {'m': {'max_tokens': 1000}}})
-    response = client.post('/config', headers=headers, json={
+    response = client.post('/config', json={
         'ai': {'model': 'm', 'base_url': 'https://proxy.test'},
         'ai_task_tokens': {'plan': 2048}, 'monitor_interval': 60})
     assert response.status_code == 200
@@ -143,9 +141,9 @@ def test_web_flat_and_legacy_writes_reach_runtime(web):
     assert read_config(path)['ai_api_key'] == 'env:KEEP_KEY'
     assert 'ai' not in read_config(path)
     before = path.read_bytes()
-    assert client.post('/config', headers=headers, json={'monitor_interval': -1}).status_code == 400
+    assert client.post('/config', json={'monitor_interval': -1}).status_code == 400
     assert path.read_bytes() == before
-    assert client.post('/config', headers=headers, json=[]).status_code == 400
+    assert client.post('/config', json=[]).status_code == 400
 
 
 def test_doctor_malformed_json_exit_code_and_no_secret_echo(tmp_path, capsys):
@@ -156,9 +154,9 @@ def test_doctor_malformed_json_exit_code_and_no_secret_echo(tmp_path, capsys):
     assert 'secret-broken-value' not in output and json.loads(output)['ok'] is False
 
 
-def test_web_safe_config_round_trip_preserves_secrets(web):
+def test_web_safe_config_round_trip_preserves_secrets(web, auth):
     client, path = web
-    headers = {'X-Auth-Token': 'access'}
+    auth(client)
     write(path, {
         'ai_api_key': 'sk-secret',
         'password': 'pw-secret',
@@ -168,7 +166,7 @@ def test_web_safe_config_round_trip_preserves_secrets(web):
                          'headers': {'Authorization': 'Bearer hdr-secret',
                                      'New-Api-User': '42'}}},
     })
-    response = client.get('/config', headers=headers)
+    response = client.get('/config')
     assert response.status_code == 200
     text = response.get_data(as_text=True)
     for secret in ('sk-secret', 'pw-secret', 'sk-model', 'hdr-secret'):
@@ -180,7 +178,7 @@ def test_web_safe_config_round_trip_preserves_secrets(web):
     assert safe['quotas']['q']['headers']['Authorization_configured']
 
     # 把脱敏后的配置原样提交：*_configured 应被忽略，原密钥/头保持不变。
-    assert client.post('/config', headers=headers, json=safe).status_code == 200
+    assert client.post('/config', json=safe).status_code == 200
     raw = read_config(path)
     assert raw['ai_api_key'] == 'sk-secret'
     assert raw['password'] == 'pw-secret'
@@ -201,21 +199,25 @@ def test_web_safe_config_round_trip_preserves_secrets(web):
     no_markers(raw)
 
 
-def test_web_sensitive_endpoints_require_auth_and_stream_ticket(web):
+def test_web_sensitive_endpoints_require_login(web, auth):
     client, _ = web
-    headers = {'X-Auth-Token': 'access'}
     for url in ('/api/stats', '/api/today', '/api/history', '/history'):
         assert client.get(url).status_code == 403
-        assert client.get(url, headers=headers).status_code == 200
     assert client.get('/stream').status_code == 403
-    assert client.post('/stream/ticket').status_code == 403
-    ticket = client.post('/stream/ticket', headers=headers).get_json()['ticket']
-    assert ticket and len(ticket) > 20
+    assert client.post('/stream/ticket').status_code == 404
+    auth(client)
+    for url in ('/api/stats', '/api/today', '/api/history', '/history'):
+        assert client.get(url).status_code == 200
+    response = client.get('/stream', buffered=False)
+    try:
+        assert response.status_code == 200
+    finally:
+        response.close()
 
 
-def test_web_stats_ignore_contest_records(web):
+def test_web_stats_ignore_contest_records(web, auth):
     client, path = web
-    headers = {'X-Auth-Token': 'access'}
+    auth(client)
     today = datetime.now().strftime('%m-%d')
     (path.parent / 'dashboard.json').write_text(json.dumps({'history': [
         {'pid': '1', 'status': 'ac', 'finished_at': f'{today} 10:00:00',
@@ -223,7 +225,7 @@ def test_web_stats_ignore_contest_records(web):
         {'type': 'contest', 'cid': 'c1', 'finished_at': f'{today} 11:00:00',
          'total': 3, 'ac': 2},
     ]}), encoding='utf-8')
-    stats = client.get('/api/stats', headers=headers).get_json()
+    stats = client.get('/api/stats').get_json()
     assert stats['total'] == 1 and stats['ac'] == 1 and stats['fail'] == 0
-    today_stats = client.get('/api/today', headers=headers).get_json()
+    today_stats = client.get('/api/today').get_json()
     assert today_stats['total'] == 1 and today_stats['ac'] == 1

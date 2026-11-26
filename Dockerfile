@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 
-ARG APP_VERSION=2.2.0
+ARG APP_VERSION=2.3.0
 LABEL org.opencontainers.image.title="HydroOJ AIbot" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.source="https://github.com/shrimp-211/HydroOJ-AIbot"

@@ -123,6 +123,23 @@ def test_api_error_raises_when_health_reports_unavailable(tmp_path, monkeypatch)
     assert ai.unavailable is True
 
 
+def test_per_model_proxy_is_passed_to_http_client(tmp_path, monkeypatch):
+    import hydroai.ai.client as client_mod
+    calls = {}
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            calls['http'] = kwargs
+
+    monkeypatch.setattr(client_mod, 'DefaultHttpxClient', FakeHTTP)
+    monkeypatch.setattr(client_mod, 'OpenAI',
+                        lambda **kwargs: calls.setdefault('openai', kwargs) or object())
+    ai = AIClient(config(tmp_path, proxy='http://127.0.0.1:7890'))
+    ai._get_client('m')
+    assert calls['http']['proxy'] == 'http://127.0.0.1:7890'
+    assert calls['openai']['http_client'] is not None
+
+
 def test_truncated_completion_accounted_but_not_submitted(tmp_path):
     ai = AIClient(config(tmp_path))
     body = {'id': 'x', 'choices': [{'index': 0, 'finish_reason': 'length',

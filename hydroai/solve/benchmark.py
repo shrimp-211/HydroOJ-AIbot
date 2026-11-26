@@ -30,7 +30,7 @@ class BenchmarkSolver:
         self.root = cfg.oj_root
         self.username = cfg.username
         self.password = cfg.password
-        self.model = model or os.environ.get("OJ_BENCHMARK_MODEL") or cfg.ai_model
+        self.model = model or cfg.benchmark_model or cfg.ai_model
         self.benchmark_users = set(str(x) for x in cfg.get("benchmark_users", [2]))
         self.processed = self._load_processed()
 
@@ -185,8 +185,7 @@ class BenchmarkSolver:
     def _get_ai(self):
         if self._ai is None:
             from hydroai.ai.client import AIClient
-            from hydroai.config.manager import ConfigManager
-            self._ai = AIClient(ConfigManager())
+            self._ai = AIClient(self._cfg)
         return self._ai
 
     def interpret_code(self, problem: dict, code: str, author_uid: str) -> dict | None:

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · HydroAI Web Console</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0d17; --panel:#151829; --border:#272b45; --text:#e6e8ff; --muted:#8b90b5; --accent:#8f82ff; --red:#ff6b6b; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:radial-gradient(circle at 20% 10%, #1c2140, var(--bg) 55%); color:var(--text); font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .login { width:min(420px, calc(100vw - 32px)); background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:28px; box-shadow:0 24px 80px #0008; }
+    .mark { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; background:linear-gradient(135deg,var(--accent),#5b4be0); font-weight:800; margin-bottom:18px; }
+    h1 { font-size:20px; margin:0 0 6px; }
+    p { color:var(--muted); margin:0 0 20px; }
+    label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+    input { width:100%; padding:11px 12px; border-radius:8px; border:1px solid var(--border); background:#0f1220; color:var(--text); font:inherit; }
+    input:focus { outline:2px solid var(--accent); outline-offset:1px; border-color:transparent; }
+    button { min-height:44px; touch-action:manipulation; width:100%; margin-top:14px; padding:11px 12px; border:0; border-radius:8px; background:var(--accent); color:#0b0d17; font-weight:700; font-size:14px; cursor:pointer; }
+    button:hover { filter:brightness(1.08); }
+    .error { margin:0 0 14px; padding:9px 11px; border-radius:8px; background:#2a1519; color:var(--red); font-size:12px; }
+    .foot { margin-top:18px; color:var(--muted); font-size:11px; text-align:center; }
+  </style>
+</head>
+<body>
+  <main class="login">
+    <div class="mark">H</div>
+    <h1>HydroAI Web Console</h1>
+    <p>请输入账号和密码后继续。</p>
+    {% if error %}<div class="error">{{ error|e }}</div>{% endif %}
+    <form method="post" action="{{ url_for('workspace.login') }}">
+      <input type="hidden" name="next" value="{{ next_path|e }}">
+      <label for="username">用户名</label>
+      <input id="username" name="username" type="text" autocomplete="username" autofocus required>
+      <label for="password" style="margin-top:12px">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">登录</button>
+    </form>
+    <div class="foot">v{{ app_version }}</div>
+  </main>
+</body>
+</html>

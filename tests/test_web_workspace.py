@@ -1,12 +1,7 @@
-import queue
 import subprocess
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
-
-from hydroai.web import app as web
-
-app = web.app
 
 
 class WorkspaceParser(HTMLParser):
@@ -29,10 +24,9 @@ class WorkspaceParser(HTMLParser):
             self.assets.append((attrs['src'], 'javascript'))
 
 
-def test_workspace_serves_local_assets_and_accessible_tabs(monkeypatch):
-    monkeypatch.setattr(web, 'AUTH_TOKEN', 'access')
-    client = app.test_client()
-    response = client.get('/', headers={'X-Auth-Token': 'access'})
+def test_workspace_serves_local_assets_and_accessible_tabs(auth, web_app):
+    client = auth(web_app.test_client())
+    response = client.get('/')
     assert response.status_code == 200
     page = WorkspaceParser()
     page.feed(response.get_data(as_text=True))
@@ -53,7 +47,7 @@ def test_workspace_serves_local_assets_and_accessible_tabs(monkeypatch):
         assert panel['aria-labelledby'] == tab['id']
         assert ('hidden' in panel) == (name != 'solve')
 
-    assert {'url', 'contest-url', 'cfg-web-token', 'cfg-advanced-json', 'usage-breakdown-by'} <= page.labels
+    assert {'url', 'contest-url', 'cfg-advanced-json', 'usage-breakdown-by'} <= page.labels
     assert page.labels <= page.elements.keys()
 
 
@@ -63,16 +57,18 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 from threading import Barrier
-from hydroai.web import app as web
+from hydroai.web.app import create_app
 
-web.ROOT = Path(sys.argv[1])
-web.AUTH_TOKEN = 'test-token'
+app = create_app(Path(sys.argv[1]), config={'WEBUI_USERNAME': 'admin', 'WEBUI_PASSWORD': 'test'})
 paths = ('/api/usage/summary', '/api/quota', '/api/usage/series', '/api/usage/breakdown')
 ready = Barrier(len(paths))
 
 def get(path):
     ready.wait()
-    response = web.app.test_client().get(path, headers={'X-Auth-Token': 'test-token'})
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess.update(authenticated=True, username='admin')
+    response = client.get(path)
     assert response.status_code == 200, path
     assert response.is_json, path
 
@@ -83,42 +79,34 @@ with ThreadPoolExecutor(len(paths)) as executor:
                    cwd=Path(__file__).resolve().parents[1], check=True, timeout=20)
 
 
-def test_kill_task_falls_back_when_os_has_no_killpg(monkeypatch):
+def test_kill_route_keeps_task_reserved_until_worker_reaps_it(monkeypatch, auth, web_app):
     class Process:
-        killed = False
-
         def poll(self):
             return None
 
-        def kill(self):
-            self.killed = True
-
+    workspace = web_app.extensions['workspace']
     process = Process()
-    monkeypatch.setattr(web, 'AUTH_TOKEN', 'access')
-    monkeypatch.setattr(web, 'active_proc', process)
-    monkeypatch.setattr(web, 'task_running', True)
-    monkeypatch.setattr(web, 'emit', lambda _: None)
-    monkeypatch.delattr(web.os, 'killpg', raising=False)
+    stopped = []
+    monkeypatch.setattr(workspace, '_active_proc', process)
+    monkeypatch.setattr(workspace, '_task_running', True)
+    monkeypatch.setattr(workspace, '_terminate', stopped.append)
 
-    response = app.test_client().post('/kill', headers={'X-Auth-Token': 'access'})
+    response = auth(web_app.test_client()).post('/kill')
 
     assert response.status_code == 200
-    assert process.killed
-    assert web.task_running  # 等待负责回收子进程的线程释放任务槽。
+    assert stopped == [process]
+    assert workspace.task_running  # 等待负责回收子进程的线程释放任务槽。
 
 
-def test_stream_flushes_handshake_before_waiting_for_logs(monkeypatch):
-    def empty_queue(*args, **kwargs):
-        raise queue.Empty
-
-    monkeypatch.setattr(web, 'AUTH_TOKEN', 'access')
-    monkeypatch.setattr(web.log_queue, 'get', empty_queue)
-    client = app.test_client()
-    ticket = client.post('/stream/ticket',
-                         headers={'X-Auth-Token': 'access'}).get_json()['ticket']
-    response = client.get('/stream', query_string={'ticket': ticket}, buffered=False)
+def test_stream_flushes_handshake_and_each_client_reads_the_same_logs(auth, web_app):
+    workspace = web_app.extensions['workspace']
+    workspace.emit('两端都能收到')
+    streams = [auth(web_app.test_client()).get('/stream', buffered=False) for _ in range(2)]
     try:
-        assert response.mimetype == 'text/event-stream'
-        assert next(response.response) == b':connected\n\n'
+        for response in streams:
+            assert response.mimetype == 'text/event-stream'
+            assert next(response.response).strip() == b':connected'
+            assert '两端都能收到' in next(response.response).decode('utf-8')
     finally:
-        response.close()
+        for response in streams:
+            response.close()

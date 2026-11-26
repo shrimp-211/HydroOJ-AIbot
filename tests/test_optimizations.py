@@ -420,7 +420,7 @@ class TestUrlNoise:
 
 class TestDashboardStats:
     def test_contest_records_do_not_pollute_rates(self, tmp_path):
-        from hydroai.web.dashboard import Dashboard
+        from hydroai.usage.dashboard import Dashboard
         d = Dashboard(save_path=str(tmp_path / "dash.json"))
         d.problem_start("1")
         d.problem_update("1", status="ac", elapsed_s=1)
@@ -433,7 +433,7 @@ class TestDashboardStats:
 
     def test_pending_uses_epoch(self, tmp_path):
         import time
-        from hydroai.web.dashboard import Dashboard
+        from hydroai.usage.dashboard import Dashboard
         d = Dashboard(save_path=str(tmp_path / "dash.json"))
         d.problem_start("9")
         d.problems["9"].started_epoch = time.time() - 10

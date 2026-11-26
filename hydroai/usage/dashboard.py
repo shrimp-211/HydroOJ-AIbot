@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""仪表盘 — 活动追踪、状态查询、统计汇总。预留 Web 接入接口。"""
+"""守护、私信与 Web 共用的任务状态和统计存储。"""
 
 import json, time, threading
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
+
+from hydroai.config.paths import data_file
 
 
 @dataclass
@@ -50,12 +52,12 @@ class Dashboard:
     """活动仪表盘 — 线程安全，预留 JSON 导出接口。
     使用方式：守护进程持有唯一实例，子进程结果通过 daemon 调用 update 方法写入。"""
 
-    def __init__(self, save_path: str = "dashboard.json", max_records: int = 500):
+    def __init__(self, save_path: str | Path | None = None, max_records: int = 500):
         # 必须用可重入锁：problem_start/save 等在持锁后调用
         # _mark_dirty/_flush，后者内部再次获取同一把锁，非重入锁会死锁，
         # 导致 dispatch 单题求解后主循环永久卡死。
         self._lock = threading.RLock()
-        self._save_path = Path(save_path)
+        self._save_path = Path(save_path) if save_path is not None else data_file("dashboard.json")
         self._max = max_records
         self._last_save = 0.0
         self._dirty = False
@@ -159,20 +161,23 @@ class Dashboard:
                 "pending": len(self.pending()), "contests": len(self.contests),
             }
 
-    def today(self) -> dict:
-        """今日统计"""
+    def today(self, *, limit: int = 0) -> dict:
+        """今日统计；需要展示明细时可一并返回最近记录。"""
         today = datetime.now().strftime("%m-%d")
         with self._lock:
-            today_records = [h for h in self.history
-                             if "pid" in h and h.get("finished_at", "").startswith(today)]
+            today_records = [h for h in self.history if isinstance(h, dict)
+                             and "pid" in h and h.get("finished_at", "").startswith(today)]
             ac = sum(1 for h in today_records if h.get("status") == "ac")
             tokens = sum(h.get("tokens_in", 0) + h.get("tokens_out", 0) for h in today_records)
             cache = sum(h.get("cache_hit", 0) for h in today_records)
             cost = sum(h.get("cost", 0) for h in today_records)
-            return {
+            result = {
                 "date": today, "total": len(today_records),
                 "ac": ac, "tokens": tokens, "cache_hit": cache, "cost": cost,
             }
+            if limit > 0:
+                result["records"] = today_records[-limit:]
+            return result
 
     # ── 格式化输出 ──
     def format_pending(self) -> str:

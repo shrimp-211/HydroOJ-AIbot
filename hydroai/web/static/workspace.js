@@ -10,31 +10,26 @@ function writePreference(storage, key, value) {
   try { window[storage].setItem(key, value); } catch { /* 禁用存储时仍可在当前页面使用。 */ }
 }
 
-let authToken = readPreference('sessionStorage', 'oj-auth');
-$('cfg-web-token').value = authToken;
-
-async function requestJSON(path, {body, method, signal} = {}) {
+async function requestJSON(path, {body, method, signal, revision, snapshot = false} = {}) {
   const headers = new Headers();
-  if (authToken) headers.set('X-Auth-Token', authToken);
+  if (revision) headers.set('If-Match', revision);
   if (body !== undefined) headers.set('Content-Type', 'application/json');
   const response = await fetch(apiRoot + path, {method: method || (body === undefined ? 'GET' : 'POST'),
     headers, body: body === undefined ? undefined : JSON.stringify(body), signal});
   const data = await response.json().catch(() => null);
-  if (response.status === 403) {
-    const error = new Error('未获授权，请在「配置 → 网页访问令牌」应用有效令牌。');
-    error.status = 403;
-    throw error;
+  if (response.status === 403 && data?.code === 'unauthorized') {
+    location.assign(`${apiRoot}/login?next=${encodeURIComponent(location.pathname + location.hash)}`);
+    throw new Error('登录已过期，请重新登录。');
   }
   if (!response.ok || data === null) {
     const details = Array.isArray(data?.errors) ? data.errors.join('；') : '';
-    throw new Error(details || data?.error || `服务响应异常（HTTP ${response.status}）`);
+    const error = new Error(details || data?.error || `服务响应异常（HTTP ${response.status}）`);
+    error.status = response.status;
+    throw error;
   }
+  if (snapshot) return {data, revision: response.headers.get('ETag'),
+    overrides: JSON.parse(response.headers.get('X-Config-Overrides') || '{}')};
   return data;
-}
-
-async function logoutWeb() {
-  try { await fetch('/logout', {method: 'POST'}); }
-  finally { location.href = '/login'; }
 }
 
 function message(id, text, state = 'idle') {
@@ -81,7 +76,7 @@ function openPage(name, focus = false) {
   const title = selected.textContent.trim();
   $('current-page').textContent = title;
   document.title = `${title} · HydroAI`;
-  if (name === 'config' && !configLoaded) loadConfig();
+  if (name === 'config' && (!configLoaded || configStale) && !changedFields.size) loadConfig();
   if (name === 'models' && !providersLoaded) loadProviders();
   if (name === 'usage' && Date.now() - usageLoadedAt > 30000) refreshUsage();
   if (selected === tabs[0]) refreshHistory();
@@ -127,14 +122,11 @@ $('theme-toggle').addEventListener('click', () => {
   writePreference('localStorage', 'hydroai-theme', dark ? 'dark' : 'light');
 });
 
-// 实时日志：切换令牌或重连时，只保留最新的一次连接尝试。
+// 实时日志：重连时只保留最新的一次连接尝试。
 const logView = $('console');
 const logLines = $('console-lines');
 const logFollow = $('log-follow');
 const logLimit = 1000;
-let source;
-let streamRetry;
-let streamGeneration = 0;
 
 function logBottom() { logView.scrollTop = logView.scrollHeight; }
 function syncLogEmpty() {
@@ -159,38 +151,22 @@ function appendStream(lines) {
   if (logFollow.checked) logBottom();
 }
 
-async function connectStream() {
-  const generation = ++streamGeneration;
-  clearTimeout(streamRetry);
-  source?.close();
+function connectStream() {
   message('stream-status', '连接中…');
-  try {
-    const {ticket} = await requestJSON('/stream/ticket', {method: 'POST'});
-    if (generation !== streamGeneration) return;
-    const connection = new EventSource(`${apiRoot}/stream?ticket=${encodeURIComponent(ticket)}`);
-    source = connection;
-    connection.onopen = () => {
-      if (generation === streamGeneration) message('stream-status', '实时日志已连接', 'ok');
-    };
-    connection.onmessage = event => {
-      if (generation !== streamGeneration) return;
-      try { appendStream(JSON.parse(event.data)); } catch { /* 忽略格式异常的事件。 */ }
-    };
-    connection.onerror = () => {
-      connection.close();
-      if (generation !== streamGeneration) return;
+  // 由浏览器自动重连并发送 Last-Event-ID，避免重放已收到的日志。
+  const connection = new EventSource(`${apiRoot}/stream`);
+  connection.onopen = () => message('stream-status', '实时日志已连接', 'ok');
+  connection.onmessage = event => {
+    try { appendStream(JSON.parse(event.data)); } catch { /* 忽略格式异常的事件。 */ }
+  };
+  connection.onerror = () => {
+    if (connection.readyState === EventSource.CLOSED) {
+      message('stream-status', '日志连接已关闭，请刷新页面。', 'warn');
+      requestJSON('/history').catch(() => {}); // 会话失效时回到登录页。
+    } else {
       message('stream-status', '连接中断，正在重连…', 'warn');
-      streamRetry = setTimeout(connectStream, 3000);
-    };
-  } catch (error) {
-    if (generation !== streamGeneration) return;
-    if (error.status === 403) {
-      message('stream-status', '日志未授权，请前往配置', 'error');
-      return;
     }
-    message('stream-status', '暂时无法连接，正在重试…', 'warn');
-    streamRetry = setTimeout(connectStream, 5000);
-  }
+  };
 }
 
 logView.addEventListener('scroll', () => {
@@ -344,7 +320,7 @@ $('btn-kill').addEventListener('click', () => {
   }
 });
 
-// 配置只在首次进入、明确重新载入或保存成功后填充，不覆盖正在编辑的内容。
+// 基本表单展示有效值，高级编辑器只读取并保存持久化配置。
 const basicFields = {
   'oj-root': 'oj_root', 'oj-base': 'oj_base', 'oj-user': 'username',
   'ai-url': 'ai_base_url', 'ai-model': 'ai_model', 'ai-reasoning': 'ai_reasoning_effort',
@@ -352,23 +328,29 @@ const basicFields = {
   'mon-state': 'monitor_state_file', 'contest-page': 'contest_start_page',
   'price-rate': 'pricing_usd_to_cny', 'price-hours': 'pricing_refresh_hours',
 };
-let configLoaded = false;
+const environmentFields = {...basicFields, 'ai-key': 'ai_api_key', 'oj-pass': 'password',
+  detect: 'difficulty_detect_enable'};
 const changedFields = new Set();
+let configLoaded = false;
 let configBusy = false;
+let configStale = false;
+let configRevision = null;
+let advancedRevision = null;
 let advancedDirty = false;
 let advancedStale = false;
 
 function syncConfigControls() {
   $('config-fields').disabled = !configLoaded || configBusy;
-  $('cfg-save').disabled = !configLoaded || configBusy;
-  for (const id of ['cfg-reload', 'advanced-save', 'advanced-load', 'model-add']) $(id).disabled = configBusy;
-  $('cfg-advanced-json').readOnly = configBusy;
-  const state = $('config-state');
-  state.textContent = configBusy ? '正在处理…' : changedFields.size ? '有未保存的修改' : configLoaded ? '配置已载入' : '尚未载入';
-  state.dataset.state = changedFields.size ? 'warn' : 'idle';
+  $('cfg-save').disabled = !configLoaded || configBusy || configStale;
+  for (const id of ['cfg-reload', 'advanced-load']) $(id).disabled = configBusy;
+  $('advanced-save').disabled = configBusy || advancedStale || !advancedRevision;
+  $('cfg-advanced-json').readOnly = configBusy || !advancedRevision;
+  message('config-state', configBusy ? '正在处理…' : configStale ? '配置已更新，请重新载入'
+    : changedFields.size ? '有未保存的修改' : configLoaded ? '配置已载入' : '尚未载入',
+  changedFields.size || configStale ? 'warn' : 'idle');
 }
 
-function populateConfig(c) {
+function populateConfig({data: c, revision, overrides}) {
   for (const [id, key] of Object.entries(basicFields)) $(`cfg-${id}`).value = c[key] ?? '';
   for (const [id, configured] of [['ai-key', c.ai_api_key_configured], ['oj-pass', c.password_configured]]) {
     const field = $(`cfg-${id}`);
@@ -382,15 +364,31 @@ function populateConfig(c) {
   $('cfg-detect').checked = Boolean(c.difficulty_detect_enable);
   $('cfg-compact').checked = Boolean(c.compact_history);
   $('cfg-price-auto').checked = c.pricing_auto_update ?? true;
-  const select = $('cfg-model-source');
-  const previous = select.value;
-  const names = [...new Set([c.ai_model, ...Object.keys(c.models || {}).filter(name => !name.startsWith('_'))])].filter(Boolean);
-  select.replaceChildren(...names.map(name => new Option(name, name)));
-  if (names.includes(previous)) select.value = previous;
-  select.disabled = !names.length;
-  $('model-discover').disabled = !names.length;
+  const names = new Set();
+  for (const [id, key] of Object.entries(environmentFields)) {
+    const field = $(`cfg-${id}`);
+    const source = overrides[key];
+    field.disabled = Boolean(source);
+    field.title = source ? `由 ${source} 控制` : '';
+    if (source) names.add(source);
+  }
+  message('cfg-env-overrides', names.size ? `以下变量优先于文件配置：${[...names].join('、')}` : '');
+  configRevision = revision;
   configLoaded = true;
+  configStale = false;
   changedFields.clear();
+}
+
+function invalidateAdvanced() {
+  if (!advancedRevision) return;
+  advancedStale = true;
+  message('cfg-advanced-msg', '服务器配置已更新。请先复制未保存的修改，再载入安全配置并合并。', 'warn');
+}
+
+function invalidateConfig() {
+  configStale = true;
+  invalidateAdvanced();
+  syncConfigControls();
 }
 
 async function configOperation(statusId, work) {
@@ -399,8 +397,10 @@ async function configOperation(statusId, work) {
   syncConfigControls();
   message(statusId, '正在处理…');
   try { await work(); }
-  catch (error) { message(statusId, error.message, 'error'); }
-  finally {
+  catch (error) {
+    if (error.status === 409) invalidateConfig();
+    message(statusId, error.message, 'error');
+  } finally {
     configBusy = false;
     syncConfigControls();
   }
@@ -408,44 +408,41 @@ async function configOperation(statusId, work) {
 
 async function loadConfig() {
   return configOperation('cfg-msg', async () => {
-    populateConfig(await requestJSON('/config'));
+    populateConfig(await requestJSON('/config', {snapshot: true}));
+    if (advancedRevision && advancedRevision !== configRevision) invalidateAdvanced();
     message('cfg-msg', '');
   });
 }
 
-function syncAdvancedSnapshot(statusId, config) {
-  const editor = $('cfg-advanced-json');
-  if (statusId === 'cfg-advanced-msg') {
-    editor.value = config ? JSON.stringify(config, null, 2) : '';
-    advancedStale = false;
-  } else if (editor.value.trim()) {
-    if (!advancedDirty && config) editor.value = JSON.stringify(config, null, 2);
-    else {
-      advancedStale = true;
-      message('cfg-advanced-msg', '服务器配置已更新。请先复制当前 JSON 修改，再载入安全配置并合并修改。', 'warn');
-    }
-  }
+async function loadAdvanced() {
+  const {data, revision} = await requestJSON('/config?view=stored', {snapshot: true});
+  $('cfg-advanced-json').value = JSON.stringify(data, null, 2);
+  advancedRevision = revision;
+  advancedDirty = advancedStale = false;
 }
 
-async function saveAndReload(path, body, statusId, success) {
-  await requestJSON(path, {body});
+async function saveConfig(body, statusId, success, revision) {
+  await requestJSON('/config', {body, revision});
+  const advanced = statusId === 'cfg-advanced-msg';
+  providersLoaded = false;
+  changedFields.clear();
+  $('cfg-ai-key').value = '';
+  $('cfg-oj-pass').value = '';
   try {
-    const config = await requestJSON('/config');
-    populateConfig(config);
-    syncAdvancedSnapshot(statusId, config);
+    populateConfig(await requestJSON('/config', {snapshot: true}));
+    if (advanced || (advancedRevision && !advancedDirty)) await loadAdvanced();
+    else invalidateAdvanced();
     message(statusId, success, 'ok');
   } catch {
-    configLoaded = false;
-    changedFields.clear();
-    $('cfg-ai-key').value = '';
-    $('cfg-oj-pass').value = '';
-    syncAdvancedSnapshot(statusId);
+    invalidateConfig();
+    if (advanced) advancedDirty = false;
     message(statusId, `${success} 但未能重新读取，请重新载入配置。`, 'warn');
   }
 }
 
+$('manage-models').addEventListener('click', () => navigate($('nav-models'), true));
 $('config-form').addEventListener('input', event => {
-  if (!event.target.closest('#config-fields')) return;
+  if (!event.target.closest('#config-fields') || event.target.readOnly) return;
   changedFields.add(event.target.id.slice(4));
   message('cfg-msg', '');
   syncConfigControls();
@@ -455,7 +452,7 @@ $('cfg-reload').addEventListener('click', () => {
 });
 $('config-form').addEventListener('submit', event => {
   event.preventDefault();
-  if (!configLoaded) return;
+  if (!configLoaded || configStale) return;
   const value = id => $(`cfg-${id}`).value.trim();
   const numbers = new Set(['ai-maxtok', 'mon-interval', 'contest-page', 'price-rate', 'price-hours']);
   const payload = {};
@@ -471,42 +468,26 @@ $('config-form').addEventListener('submit', event => {
   if (value('ai-key')) payload.ai_api_key = value('ai-key');
   if ($('cfg-oj-pass').value) payload.password = $('cfg-oj-pass').value;
   if (!Object.keys(payload).length) { message('cfg-msg', '没有需要保存的修改。'); return; }
-  configOperation('cfg-msg', () => saveAndReload('/config', payload, 'cfg-msg', '配置已保存。'));
-});
-
-$('access-form').addEventListener('submit', event => {
-  event.preventDefault();
-  if (configBusy) { toast('请等待当前配置操作结束。', 'error'); return; }
-  authToken = $('cfg-web-token').value.trim();
-  writePreference('sessionStorage', 'oj-auth', authToken);
-  toast(authToken ? '已应用令牌，正在重新连接。' : '已移除浏览器保存的令牌。');
-  usageLoadedAt = 0;
-  connectStream();
-  if (!changedFields.size) loadConfig();
+  configOperation('cfg-msg', () => saveConfig(payload, 'cfg-msg', '配置已保存。', configRevision));
 });
 
 $('cfg-advanced-json').addEventListener('input', () => { advancedDirty = true; });
 $('advanced-load').addEventListener('click', () => {
   if (advancedDirty && !window.confirm('载入配置将覆盖 JSON 编辑区的修改，是否继续？')) return;
   configOperation('cfg-advanced-msg', async () => {
-    $('cfg-advanced-json').value = JSON.stringify(await requestJSON('/config'), null, 2);
-    advancedDirty = false;
-    advancedStale = false;
+    await loadAdvanced();
     message('cfg-advanced-msg', '已载入安全配置，密钥不会回显。', 'ok');
   });
 });
 $('advanced-save').addEventListener('click', () => {
   if (changedFields.size) { message('cfg-advanced-msg', '请先保存或重新载入基本配置，再保存高级配置。', 'error'); return; }
-  if (advancedStale) { message('cfg-advanced-msg', '当前 JSON 基于旧配置。请先复制草稿，载入安全配置后再合并修改。', 'error'); return; }
+  if (advancedStale || !advancedRevision) return;
   let doc;
   try {
     doc = JSON.parse($('cfg-advanced-json').value);
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('必须是 JSON 对象');
   } catch (error) { message('cfg-advanced-msg', `请检查 JSON 格式：${error.message}`, 'error'); return; }
-  configOperation('cfg-advanced-msg', async () => {
-    await saveAndReload('/config', doc, 'cfg-advanced-msg', '高级配置已保存。');
-    advancedDirty = false;
-  });
+  configOperation('cfg-advanced-msg', () => saveConfig(doc, 'cfg-advanced-msg', '高级配置已保存。', advancedRevision));
 });
 $('cfg-diagnose').addEventListener('click', () => withButton('cfg-diagnose', async () => {
   message('cfg-diagnostics', '正在检查已保存的配置（不调用 AI）…');
@@ -516,32 +497,6 @@ $('cfg-diagnose').addEventListener('click', () => withButton('cfg-diagnose', asy
       ...result.models.map(model => `${model.name}：${model.provider}，输出上限 ${model.output_limit ?? '未知'}`)].join('\n'), result.ok ? 'ok' : 'error');
   } catch (error) { message('cfg-diagnostics', error.message, 'error'); }
 }));
-$('model-discover').addEventListener('click', () => withButton('model-discover', async () => {
-  message('cfg-model-discovery', '正在查询已保存的连接…');
-  const sourceSelect = $('cfg-model-source');
-  const model = sourceSelect.value;
-  const url = $('new-model-url');
-  const previousUrl = url.value;
-  try {
-    const data = await requestJSON('/models/discover', {body: {model}});
-    if (sourceSelect.value !== model) { message('cfg-model-discovery', '连接已切换，请重新查询。'); return; }
-    $('remote-model-ids').replaceChildren(...data.models.map(row => new Option(row.id, row.id)));
-    if (url.value === previousUrl) url.value = data.base_url;
-    message('cfg-model-discovery', `找到 ${data.models.length} 个模型。可在 API 模型 ID 中选择；列表不代表全部模型都支持 Chat Completions。`, 'ok');
-  } catch (error) { message('cfg-model-discovery', error.message, 'error'); }
-}));
-$('model-form').addEventListener('submit', event => {
-  event.preventDefault();
-  if (changedFields.size) { message('model-message', '请先保存或重新载入基本配置，再新增模型。', 'error'); return; }
-  const value = id => $(`new-model-${id}`).value.trim();
-  const body = {name: value('name'), model_id: value('id'), base_url: value('url'), api_key_env: value('key-env'),
-    provider: value('provider'), pricing_provider: value('price-provider'), set_default: $('new-model-default').checked};
-  configOperation('model-message', async () => {
-    await saveAndReload('/models/add', body, 'model-message', '模型连接已保存。');
-    event.target.reset();
-  });
-});
-
 let pricingPending = false;
 async function showPrices(refresh) {
   if (pricingPending) return;
@@ -816,10 +771,11 @@ $('quota-refresh').addEventListener('click', () => withButton('quota-refresh', (
 
 // ── 模型供应商（cc-switch 风格）──
 const providerState = {
-  presets: [], categories: [], configured: [], active: null,
-  search: '', category: 'all', preset: null,
+  presets: [], categories: [], configured: [], roles: [], active: null,
+  search: '', category: 'all', savedConnection: null, formId: 0,
 };
 let providersLoaded = false;
+let providerBusy = false;
 
 function providerInitial(name) {
   return String(name || '?').trim().slice(0, 1).toUpperCase();
@@ -836,6 +792,7 @@ async function loadProviders(force = false) {
     providerState.presets = data.presets || [];
     providerState.categories = data.categories || [];
     providerState.configured = data.configured || [];
+    providerState.roles = data.roles || [];
     providerState.active = data.active || {};
     providersLoaded = true;
     renderProviderCategories();
@@ -903,7 +860,7 @@ function renderProviders() {
     for (const text of [
       `模型：${item.model_id || item.name}`,
       `地址：${item.base_url || '未设置'}`,
-      `${item.api_key_configured ? 'API Key：已配置' : 'API Key：缺失'}${item.tiers?.length ? ' · 路由：' + item.tiers.join('/') : ''}`,
+      `${item.api_key_configured ? 'API Key：已配置' : 'API Key：缺失'}${item.proxy_configured ? ' · 代理：已配置' : ''}${item.tiers?.length ? ' · 路由：' + item.tiers.join('/') : ''}`,
     ]) {
       const line = document.createElement('div');
       line.className = 'provider-meta';
@@ -932,10 +889,110 @@ function renderProviders() {
       currentButton.textContent = '当前使用中';
       actions.appendChild(currentButton);
     }
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'btn btn-danger';
+    deleteButton.textContent = '删除';
+    const inUse = (item.roles_using || []).filter(Boolean);
+    deleteButton.disabled = item.current || inUse.length > 0;
+    deleteButton.title = item.current
+      ? '当前默认模型不能删除，请先切换'
+      : inUse.length ? '正在被用途使用: ' + inUse.join('、') : '删除该模型连接';
+    deleteButton.addEventListener('click', () => deleteProvider(item.name));
+    actions.appendChild(deleteButton);
+    if (item.managed) {
+      const proxyButton = node('button', item.proxy_configured ? '修改代理' : '设置代理', 'btn btn-quiet');
+      proxyButton.addEventListener('click', () => setProviderProxy(item.name));
+      actions.append(proxyButton);
+    }
+    const discoverButton = node('button', '查询模型', 'btn btn-quiet');
+    discoverButton.addEventListener('click', () => openPresetForm({
+      id: item.name, name: item.name, base_url: item.base_url, model: item.model_id, provider: item.provider,
+      note: '使用已保存的连接查询。添加其他模型 ID 时，请填写新的配置名称及密钥环境变量。',
+    }, item));
+    actions.append(discoverButton);
     card.appendChild(actions);
     list.appendChild(card);
   }
+  renderRoles();
   renderPresets();
+}
+
+function renderRoles() {
+  const list = $('model-roles');
+  list.replaceChildren();
+  const names = providerState.configured.map(item => item.name);
+  for (const role of providerState.roles) {
+    const row = document.createElement('div');
+    row.className = 'role-row';
+    const label = document.createElement('div');
+    label.className = 'role-label';
+    const title = document.createElement('span');
+    title.textContent = role.name;
+    const hint = document.createElement('span');
+    hint.className = 'role-hint';
+    hint.textContent = role.hint || '';
+    label.append(title, hint);
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', role.name);
+    if (role.optional) {
+      const empty = document.createElement('option');
+      empty.value = '';
+      empty.textContent = role.id === 'editorial' ? '跟随求解模型'
+        : role.id === 'vision' ? '自动选择'
+        : role.id === 'difficulty' ? '沿用路由首档'
+        : '跟随默认模型';
+      select.appendChild(empty);
+    }
+    const values = [...names];
+    if (role.value && !values.includes(role.value)) values.unshift(role.value);
+    for (const name of values) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      select.appendChild(option);
+    }
+    select.value = role.value || '';
+    if (!role.optional && !select.value && values.length) select.value = values[0];
+    select.addEventListener('change', () => switchRole(role.id, select.value));
+    row.append(label, select);
+    list.appendChild(row);
+  }
+}
+
+async function changeProvider(path, body, success, statusId) {
+  if (providerBusy) return false;
+  providerBusy = true;
+  try {
+    await requestJSON(path, {body});
+    invalidateConfig();
+    await loadProviders(true);
+    toast(success, 'ok');
+    return true;
+  } catch (error) {
+    if (statusId) message(statusId, error.message, 'error');
+    else toast(error.message, 'error');
+    return false;
+  } finally {
+    providerBusy = false;
+  }
+}
+
+async function switchRole(role, name) {
+  const title = providerState.roles.find(item => item.id === role)?.name || role;
+  if (!await changeProvider('/api/models/role', {role, name}, `已更新${title}`)) renderRoles();
+}
+
+function setProviderProxy(name) {
+  const proxy = window.prompt(
+    `为「${name}」设置代理（留空表示直连）\n支持 http://、https://、socks5://、socks5h://`, '');
+  if (proxy === null) return;
+  changeProvider('/api/models/proxy', {name, proxy: proxy.trim()}, proxy.trim() ? '已设置代理' : '已清除代理');
+}
+
+function deleteProvider(name) {
+  if (!window.confirm(`确定删除模型「${name}」？`)) return;
+  changeProvider('/api/models/delete', {name}, `已删除模型 ${name}`);
 }
 
 function providerPresetMatches(preset) {
@@ -993,12 +1050,10 @@ function renderPresets() {
   }
 }
 
-function openPresetForm(preset) {
-  providerState.preset = preset;
-  const existing = new Set(providerState.configured.map(item => item.name));
-  let name = preset.id;
-  let suffix = 2;
-  while (existing.has(name)) name = `${preset.id}-${suffix++}`;
+function openPresetForm(preset, saved = null) {
+  providerState.savedConnection = saved;
+  providerState.formId++;
+  const name = saved ? '' : preset.id;
   $('preset-name').value = name;
   $('preset-model').value = preset.model || (preset.models || [])[0] || '';
   $('preset-base').value = preset.base_url || '';
@@ -1006,57 +1061,87 @@ function openPresetForm(preset) {
   $('preset-provider').value = [...$('preset-provider').options]
     .some(option => option.value === preset.provider) ? preset.provider : 'compatible';
   $('preset-pricing').value = preset.pricing_provider || '';
-  $('preset-set-default').checked = true;
-  $('provider-form-title').textContent = `添加 ${preset.name}`;
+  $('preset-set-default').checked = !saved;
+  $('provider-form-title').textContent = saved ? `查询 ${saved.name} 或添加新连接` : `添加 ${preset.name}`;
   $('provider-form-note').textContent = preset.note || '模型 ID 为示例值，可按服务商控制台修改。';
-  message('provider-msg', '');
+  $('preset-api-key').value = '';
+  $('preset-proxy').value = preset.proxy || '';
+  $('preset-model-picker-wrap').hidden = true;
+  $('preset-model-picker').replaceChildren();
+  const duplicate = providerState.configured.some(item => item.managed && item.name === name);
+  message('provider-msg', duplicate ? `名称「${name}」已存在，请修改配置名称或切换已有连接。` : '', 'error');
   $('provider-form').hidden = false;
   $('provider-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
 
+function closeProviderForm() {
+  providerState.formId++;
+  $('provider-form').hidden = true;
+  $('preset-api-key').value = '';
+  message('provider-msg', '');
+}
+
+const presetValue = field => $(`preset-${field}`).value.trim();
+
+function connectionDraft() {
+  return {base_url: presetValue('base'), api_key_env: presetValue('key-env'),
+    api_key_value: presetValue('api-key'), provider: presetValue('provider'), proxy: presetValue('proxy')};
+}
+
+async function discoverPresetModels() {
+  return withButton('preset-discover', async () => {
+    const draft = connectionDraft();
+    if (!draft.base_url) { message('provider-msg', '请先填写 Base URL。', 'error'); return; }
+    const formId = providerState.formId;
+    const saved = providerState.savedConnection;
+    const body = saved && draft.base_url === saved.base_url && !draft.api_key_value && !draft.api_key_env && !draft.proxy
+      ? {model: saved.name} : draft;
+    message('provider-msg', '正在获取模型列表…');
+    try {
+      const data = await requestJSON('/models/discover', {body});
+      if (formId !== providerState.formId) return;
+      if (Object.keys(draft).some(key => draft[key] !== connectionDraft()[key])) {
+        message('provider-msg', '连接参数已修改，请重新获取模型列表。', 'warn');
+        return;
+      }
+      const models = (data.models || []).map(item => item.id).filter(Boolean);
+      if (!models.length) throw new Error('服务返回了空模型列表');
+      const select = $('preset-model-picker');
+      select.replaceChildren(...models.map(id => new Option(id, id)));
+      select.value = models.includes(presetValue('model')) ? presetValue('model') : models[0];
+      $('preset-base').value = data.base_url;
+      $('preset-model').value = select.value;
+      $('preset-model-picker-wrap').hidden = false;
+      message('provider-msg', `获取到 ${models.length} 个模型；列表不代表全部支持 Chat Completions。`, 'ok');
+    } catch (error) {
+      if (formId === providerState.formId) message('provider-msg', error.message, 'error');
+    }
+  });
+}
+
 async function addProvider(event) {
   event.preventDefault();
-  const submit = $('provider-form').querySelector('button[type="submit"]');
-  const body = {
-    name: $('preset-name').value.trim(),
-    model_id: $('preset-model').value.trim(),
-    base_url: $('preset-base').value.trim(),
-    api_key_env: $('preset-key-env').value.trim(),
-    provider: $('preset-provider').value,
-    pricing_provider: $('preset-pricing').value,
-    set_default: $('preset-set-default').checked,
-  };
-  if (!body.name || !body.model_id || !body.api_key_env) {
-    message('provider-msg', '请填写配置名称、模型 ID 和 API Key 环境变量。', 'error');
+  const body = {...connectionDraft(), name: presetValue('name'), model_id: presetValue('model'),
+    pricing_provider: presetValue('pricing'), set_default: $('preset-set-default').checked};
+  if (providerState.configured.some(item => item.managed && item.name === body.name)) {
+    message('provider-msg', `名称「${body.name}」已存在，请换一个名称。`, 'error');
     return;
   }
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  const formId = providerState.formId;
   submit.disabled = true;
   message('provider-msg', '正在添加…');
   try {
-    await requestJSON('/models/add', {body});
-    message('provider-msg', '已添加供应商。', 'ok');
-    $('provider-form').hidden = true;
-    providersLoaded = false;
-    configLoaded = false;
-    await loadProviders(true);
-    toast(`已添加 ${body.name}`, 'ok');
-  } catch (error) {
-    message('provider-msg', error.message, 'error');
+    if (await changeProvider('/models/add', body, `已添加 ${body.name}`, 'provider-msg') && formId === providerState.formId) {
+      closeProviderForm();
+    }
   } finally {
     submit.disabled = false;
   }
 }
 
-async function switchProvider(name, single = true) {
-  try {
-    await requestJSON('/api/models/switch', {body: {name, single}});
-    toast(`已切换到 ${name}${single ? '（单模型路由）' : ''}`, 'ok');
-    providersLoaded = false;
-    configLoaded = false;
-    await loadProviders(true);
-  } catch (error) {
-    toast(error.message, 'error');
-  }
+function switchProvider(name, single = true) {
+  changeProvider('/api/models/switch', {name, single}, `已切换到 ${name}${single ? '（单模型路由）' : ''}`);
 }
 
 $('provider-search').addEventListener('input', event => {
@@ -1068,11 +1153,11 @@ $('provider-category').addEventListener('change', event => {
   renderPresets();
 });
 $('provider-form').addEventListener('submit', addProvider);
-$('provider-form-close').addEventListener('click', () => {
-  $('provider-form').hidden = true;
-  message('provider-msg', '');
-});
+$('preset-discover').addEventListener('click', discoverPresetModels);
+$('provider-form-close').addEventListener('click', closeProviderForm);
+$('preset-model-picker').addEventListener('change', event => { $('preset-model').value = event.target.value; });
 
+syncConfigControls();
 openPage(location.hash.slice(1));
 connectStream();
 refreshStatus(true);

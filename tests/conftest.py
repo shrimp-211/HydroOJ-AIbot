@@ -21,3 +21,20 @@ def _clean_app_environment(monkeypatch, tmp_path):
     # Tests that need a different location override OJ_DATA_DIR explicitly.
     monkeypatch.setenv("OJ_DATA_DIR", str(tmp_path))
     yield
+
+
+@pytest.fixture
+def web_app(tmp_path):
+    from hydroai.web.app import create_app
+    return create_app(tmp_path, config={"TESTING": True, "WEBUI_USERNAME": "admin", "WEBUI_PASSWORD": "secret"})
+
+
+@pytest.fixture
+def auth():
+    """为 Flask 测试客户端写入登录会话，等价于已通过登录页。"""
+    def _auth(client, username="admin"):
+        with client.session_transaction() as sess:
+            sess["authenticated"] = True
+            sess["username"] = username
+        return client
+    return _auth

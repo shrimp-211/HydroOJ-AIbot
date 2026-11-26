@@ -34,7 +34,8 @@ class TestDataSupplement:
         self.root = root or cfg.oj_root
         self.username = username or cfg.username
         self.password = password or cfg.password
-        self.model = model or os.environ.get("OJ_TD_MODEL") or cfg.ai_model
+        self._cfg = cfg
+        self.model = model or cfg.testdata_model or cfg.ai_model
         self.url = url
         self.session = create_session(verify_ssl=False)
         self._parsed = None
@@ -66,8 +67,7 @@ class TestDataSupplement:
     def _get_ai_client(self):
         if self._ai_client is None:
             from hydroai.ai.client import AIClient
-            from hydroai.config.manager import ConfigManager
-            self._ai_client = AIClient(ConfigManager())
+            self._ai_client = AIClient(self._cfg)
         return self._ai_client
 
     # ── 登录 ──

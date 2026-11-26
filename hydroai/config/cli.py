@@ -8,11 +8,11 @@ from pathlib import Path
 from hydroai import __version__ as APP_VERSION
 from hydroai.config.paths import config_file
 
-from hydroai.config.io import atomic_write_json, read_config, validate_document
+from hydroai.config.inspection import diagnose, price_report
+from hydroai.config.io import atomic_write_json, check_document, load_dotenv, read_config
+from hydroai.config.models import add_model, model_names
 from hydroai.config.manager import ConfigManager
-from hydroai.ai.protocol import build_request, provider_for
-from hydroai.ai.services import normalize_base_url, discover_models, ModelServiceError
-from hydroai.oj.common import load_dotenv
+from hydroai.ai.services import normalize_base_url, discover_models
 
 
 def initialize(path, *, model, base_url, oj_root, provider='compatible', profile='balanced'):
@@ -35,98 +35,13 @@ def initialize(path, *, model, base_url, oj_root, provider='compatible', profile
         'show_thinking': False, 'ai_vision_model': '',
         'msg_whitelist': [], 'msg_push_list': [], 'msg_superuser': [], 'benchmark_users': [],
     }
-    errors = validate_document(cfg)
-    if errors:
-        raise ValueError('; '.join(errors))
+    check_document(cfg)
     atomic_write_json(path, cfg)
     env = path.with_name('.env')
     if not env.exists():
         with env.open('x', encoding='utf-8') as stream:
             stream.write('OJ_USERNAME=\nOJ_PASSWORD=\nAI_API_KEY=\n')
     return cfg
-
-
-def diagnose(path):
-    errors, warnings, rows = [], [], []
-    try:
-        if not Path(path).exists():
-            errors.append('配置文件不存在，请先运行 init')
-        raw = read_config(path)
-        errors.extend(validate_document(raw))
-    except (OSError, ValueError) as exc:
-        return {'ok': False, 'errors': [f'配置读取失败: {type(exc).__name__}'], 'warnings': [], 'models': []}
-    if errors:
-        return {'ok': False, 'errors': errors, 'warnings': warnings, 'models': []}
-    cm = ConfigManager(str(path))
-    errors.extend(cm.validate())
-    names = {cm.ai_model}
-    names.update(name for name in cm.models if not name.startswith('_'))
-    for name in sorted(names):
-        try:
-            settings = cm.get_model_config(name)
-        except ValueError:
-            errors.append(f'模型 {name}: API 地址无效')
-            continue
-        row = {'name': name, 'provider': provider_for(settings),
-               'api_key_configured': bool(settings['api_key'])}
-        if not row['api_key_configured']:
-            errors.append(f'模型 {name}: API Key 未配置或环境变量引用不存在')
-        try:
-            args = build_request(name, [], settings, max_tokens=cm.task_token_limit())
-            row['output_limit'] = args.get('max_tokens', args.get('max_completion_tokens'))
-        except (TypeError, ValueError) as exc:
-            errors.append(f'模型 {name}: 请求参数无效 ({type(exc).__name__})')
-        price = cm.pricing_info(name)
-        row['pricing'] = price
-        if not price['known']:
-            warnings.append(f"模型 {name}: 费用未知；{price.get('reason', '')}")
-        elif price.get('stale'):
-            warnings.append(f'模型 {name}: 正在使用过期的价格缓存')
-        rows.append(row)
-    if not cm.username or not cm.password:
-        warnings.append('OJ 登录凭据未完整配置，求解前需要补充 OJ_USERNAME / OJ_PASSWORD')
-    return {'ok': not errors, 'errors': errors, 'warnings': warnings, 'models': rows}
-
-
-def price_report(manager, *, refresh=False):
-    state = manager.price_catalog().snapshot(force=refresh, ttl=manager.pricing_refresh_hours * 3600)
-    names = sorted({manager.ai_model} | {name for name in manager.models if not name.startswith('_')})
-    return {'ok': bool(state['entries']) if refresh else True,
-            **{key: value for key, value in state.items() if key != 'entries'},
-            'count': len(state['entries']),
-            'models': [{'name': name, **manager.pricing_info(name)} for name in names]}
-
-
-def add_model(path, *, name, model_id, base_url, api_key_env='AI_API_KEY',
-              provider='compatible', pricing_provider='', set_default=False):
-    import re
-    if not isinstance(name, str) or not name.strip() or name.startswith('_') or len(name) > 256:
-        raise ValueError('配置名称不能为空、过长或以 _ 开头')
-    if not isinstance(model_id, str) or not model_id.strip() or any(ord(c) < 32 for c in name + model_id):
-        raise ValueError('模型 ID 必须是非空字符串，且不能包含控制字符')
-    if not isinstance(api_key_env, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', api_key_env):
-        raise ValueError('API Key 环境变量名无效')
-    doc = read_config(path)
-    models = doc.setdefault('models', {})
-    if not isinstance(models, dict):
-        raise ValueError('models 配置必须是对象，请先修正配置')
-    if name in models:
-        raise ValueError('该配置名称已存在，请使用新名称；已有模型可在 JSON 中修改')
-    models[name] = {'model_id': model_id.strip(), 'base_url': normalize_base_url(base_url),
-                    'api_key': 'env:' + api_key_env, 'provider': provider, 'max_tokens': 16384,
-                    'reasoning_effort': '', 'supports_reasoning_effort': False}
-    if pricing_provider:
-        models[name]['pricing_provider'] = pricing_provider
-    if set_default:
-        doc['ai_model'] = name
-        # Explicitly selecting a single default replaces the old tier routing as well.
-        doc['model_router'] = {'tiers': {'flash': name}}
-        doc['difficulty_skip_model'] = ''
-    errors = validate_document(doc)
-    if errors:
-        raise ValueError('; '.join(errors))
-    atomic_write_json(path, doc)
-    return {'ok': True, 'name': name, 'model_id': model_id.strip()}
 
 
 def _human_tokens(value) -> str:
@@ -252,7 +167,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', action='version',
                         version=f'%(prog)s {APP_VERSION}')
-    parser.add_argument('--config', default=str(config_file('config.json')), help='配置文件路径')
+    parser.add_argument('--config', help='配置文件路径')
     commands = parser.add_subparsers(dest='command', required=True)
     init = commands.add_parser('init', help='创建单模型配置，不覆盖已有文件')
     init.add_argument('--model', required=True)
@@ -276,6 +191,7 @@ def main(argv=None):
     add.add_argument('--api-key-env', default='AI_API_KEY')
     add.add_argument('--provider', choices=['compatible', 'openai', 'deepseek', 'zhipu'], default='compatible')
     add.add_argument('--pricing-provider', default='', help='models.dev 供应商 ID；代理服务须明确指定')
+    add.add_argument('--proxy', default='', help='仅该模型使用的 HTTP(S)/SOCKS5 代理，例如 http://127.0.0.1:7890')
     add.add_argument('--set-default', action='store_true', help='设为默认，并切换为该模型的单模型路由')
     usage = commands.add_parser('usage', help='查看逐请求 token/费用统计')
     usage.add_argument('--days', type=int, default=30, help='统计最近 N 天（默认 30）')
@@ -286,17 +202,20 @@ def main(argv=None):
     quota.add_argument('--refresh', action='store_true', help='强制刷新远端余额，忽略缓存')
     quota.add_argument('--json', action='store_true')
     args = parser.parse_args(argv)
+    custom_path = args.config
+    args.config = custom_path or str(config_file('config.json'))
     try:
         if args.command == 'init':
             initialize(args.config, model=args.model, base_url=args.base_url, oj_root=args.oj_root,
                        provider=args.provider, profile=args.profile)
             print(f'已生成 {args.config}。请填写同目录 .env，再运行 doctor。')
             return 0
-        load_dotenv(str(Path(args.config).with_name('.env')))
+        load_dotenv(Path(custom_path).with_name('.env') if custom_path else None)
         if args.command == 'add-model':
             report = add_model(args.config, name=args.name, model_id=args.model_id, base_url=args.base_url,
                                api_key_env=args.api_key_env, provider=args.provider,
-                               pricing_provider=args.pricing_provider, set_default=args.set_default)
+                               pricing_provider=args.pricing_provider, set_default=args.set_default,
+                               proxy=args.proxy)
             print(json.dumps(report, ensure_ascii=False))
             return 0
         if args.command == 'usage':
@@ -317,7 +236,7 @@ def main(argv=None):
         manager = ConfigManager(args.config)
         if args.command == 'models':
             name = args.model or manager.ai_model
-            if name != manager.ai_model and name not in manager.models:
+            if name not in model_names(manager):
                 raise ValueError('模型配置不存在，请先运行 add-model')
             report = discover_models(manager.get_model_config(name))
             if args.json:
@@ -330,9 +249,7 @@ def main(argv=None):
             if args.usd_to_cny is not None:
                 patch = read_config(args.config)
                 patch['pricing_usd_to_cny'] = args.usd_to_cny
-                errors = validate_document(patch)
-                if errors:
-                    raise ValueError('; '.join(errors))
+                check_document(patch)
                 atomic_write_json(args.config, patch)
                 manager.reload()
             report = price_report(manager, refresh=args.refresh)
