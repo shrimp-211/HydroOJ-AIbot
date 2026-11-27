@@ -41,7 +41,7 @@ def _batch_response(status, data=None):
 
 
 def test_contest_dry_run_discovers_without_writes(monkeypatch, caplog, readonly_batch):
-    readonly_batch.get.side_effect = [
+    readonly_batch.request.side_effect = [
         _batch_response(200, {'tdoc': {'title': 'Contest', 'pids': [101, 102]}}),
         _batch_response(200, {'tdoc': {'title': 'Training'}, 'pids': [201]}),
     ]
@@ -50,7 +50,7 @@ def test_contest_dry_run_discovers_without_writes(monkeypatch, caplog, readonly_
     with caplog.at_level(logging.INFO):
         contest.main()
     assert all(str(pid) in caplog.text for pid in [101, 102, 201, 301])
-    assert readonly_batch.get.call_count == 2
+    assert readonly_batch.request.call_count == 2
     readonly_batch.post.assert_not_called()
 
 
@@ -62,7 +62,7 @@ def test_contest_dry_run_discovers_without_writes(monkeypatch, caplog, readonly_
     ('/training/def', Timeout, 'Timeout'),
 ])
 def test_contest_dry_run_reports_failed_target_and_continues(monkeypatch, caplog, readonly_batch, path, response, reason):
-    readonly_batch.get.side_effect = [response]
+    readonly_batch.request.side_effect = [response]
     monkeypatch.setattr(sys, 'argv', ['contest', 'https://oj.example.test' + path,
                                       'https://oj.example.test/p/301', '--dry-run'])
     with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
@@ -74,7 +74,7 @@ def test_contest_dry_run_reports_failed_target_and_continues(monkeypatch, caplog
 
 
 def test_contest_dry_run_allows_empty_problem_lists(monkeypatch, caplog, readonly_batch):
-    readonly_batch.get.side_effect = [
+    readonly_batch.request.side_effect = [
         _batch_response(200, {'tdoc': {'pids': []}}), _batch_response(200, {'pids': []}),
     ]
     monkeypatch.setattr(sys, 'argv', ['contest', 'https://oj.example.test/d/system/contest/abc',
@@ -86,7 +86,7 @@ def test_contest_dry_run_allows_empty_problem_lists(monkeypatch, caplog, readonl
 
 
 def test_contest_normal_run_reports_discovery_failure_after_valid_work(monkeypatch, batch_session, tmp_path):
-    batch_session.get.return_value = _batch_response(404)
+    batch_session.request.return_value = _batch_response(404)
     batch_session.post.return_value = _batch_response(200)
     monkeypatch.setattr(contest, '_has_testdata', lambda *a: True)
     monkeypatch.setattr(contest, '_push', Mock())
@@ -108,7 +108,7 @@ def test_submit_reports_domain_record_url(caplog):
               'cookie_jar': '', 'verify_timeout': 1, 'lang': 'cc.cc14o2'}
     oj = oj_client.OJClient(config)
     oj.session = Mock()
-    oj.session.post.return_value = SimpleNamespace(
+    oj.session.request.return_value = SimpleNamespace(
         status_code=302, headers={'Location': 'https://oj.test/d/contest/record/abc123'})
     with caplog.at_level(logging.INFO):
         assert oj.submit_code('1000', 'int main(){}', contest_id='c1') == 'abc123'
@@ -193,7 +193,7 @@ def test_contest_normal_discovery_attends_before_read(monkeypatch):
     def get(*args, **kwargs):
         actions.append('read')
         return SimpleNamespace(status_code=200, json=lambda: {'tdoc': {'title': 'C', 'pids': [42]}})
-    session.get.side_effect = get
+    session.request.side_effect = get
     url = 'https://oj/d/system/contest/abc'
     info = contest.parse_contest_or_problem(url)
     assert list(contest.discover_problems(session, url, info)) == [('https://oj', 'system', 42, 'C', 'abc')]

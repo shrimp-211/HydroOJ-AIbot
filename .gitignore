@@ -25,6 +25,9 @@ usage.db
 usage.db-wal
 usage.db-shm
 usage.db-journal
+insight.db*
+assistant.db*
+assistant_seen.db*
 daemon.pid
 daemon.pid.tmp
 model_prices.json

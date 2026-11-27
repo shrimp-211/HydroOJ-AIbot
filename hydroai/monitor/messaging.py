@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """消息后端 — OJ 私信收发，与守护进程共享输入队列。"""
 
-import hashlib, json, logging, queue, re, subprocess, sys, threading, time
+import hashlib, json, logging, os, queue, re, subprocess, sys, threading, time
 from pathlib import Path
 from datetime import datetime
 import requests
@@ -22,6 +22,11 @@ class MsgBackend:
         self.whitelist = whitelist
         self.push_list = push_list
         self.interval = interval
+        from hydroai.oj.api import OJApi
+        self.api = OJApi(root, session=session,
+                         username=os.environ.get("OJ_USERNAME", ""),
+                         password=os.environ.get("OJ_PASSWORD", ""),
+                         retry_message_403=True)
         # 用 dict 当「有序集合」：既能 O(1) 判重，又能按插入顺序淘汰旧键。
         # 原先用 set + list(...)[-500:]，切片顺序随哈希变化，淘汰几乎是随机的，
         # 可能把刚处理过的消息键丢掉，导致同一条私信被重复执行。
@@ -41,8 +46,8 @@ class MsgBackend:
     def send(self, uid: int, text: str):
         """发送私信。复用 oj_common 的限速 + 403 自动重新登录重试。"""
         try:
-            from hydroai.oj.common import push_oj_message
-            push_oj_message(self.s, self.root, text, push_uids=[uid])
+            from hydroai.oj.notify import Notifier
+            Notifier(self.api).send(uid, text)
         except Exception as e:
             log.warning("[消息] 发送失败: %s", e)
 
@@ -84,28 +89,24 @@ class MsgBackend:
 
     def fetch(self) -> list[dict]:
         try:
-            r = self.s.get(f"{self.root}/home/messages",
-                           headers={"Accept": "application/json"}, timeout=20)
-            if r.status_code != 200: return []
             now = time.time()
             cutoff = now - 120
             msgs = []
-            for thread in r.json().get("messages", {}).values():
-                if not isinstance(thread, dict): continue
-                udoc = thread.get("udoc", {})
-                for m in thread.get("messages", []):
-                    if m.get("from") == self.my_uid: continue
-                    if m.get("flag", 0) != 1: continue
-                    mid = m.get("_id", "")
-                    if len(mid) >= 8:
-                        try:
-                            if int(mid[:8], 16) < cutoff: continue
-                        except ValueError: pass
-                    key = self._msg_key(m)
-                    if key in self.processed: continue
-                    m["_udoc_uname"] = udoc.get("uname", "?")
-                    m["_udoc_id"] = udoc.get("_id", 0)
-                    msgs.append(m)
+            for m in self.api.messages.inbox():
+                if m.get("from") == self.my_uid: continue
+                # 系统通知由 assistant 处理，不作为普通命令回复。
+                if m.get("from") == 1: continue
+                if m.get("flag", 0) != 1: continue
+                mid = m.get("_id", "")
+                if len(mid) >= 8:
+                    try:
+                        if int(mid[:8], 16) < cutoff: continue
+                    except ValueError: pass
+                key = self._msg_key(m)
+                if key in self.processed: continue
+                m["_udoc_uname"] = m.get("peer_name") or "?"
+                m["_udoc_id"] = m.get("peer", 0)
+                msgs.append(m)
             return msgs
         except Exception as e:
             log.warning("[消息] 获取异常: %s", e)

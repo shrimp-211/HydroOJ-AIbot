@@ -17,6 +17,7 @@ import requests
 
 from hydroai.oj.common import (load_dotenv, create_session, smart_login,
                        parse_contest_or_problem, parse_problem_url)
+from hydroai.oj.api import OJApi, OJError
 
 log = logging.getLogger("testdata_supplement")
 
@@ -40,6 +41,14 @@ class TestDataSupplement:
         self.session = create_session(verify_ssl=False)
         self._parsed = None
         self._ai_client = None
+        self._api = None
+
+    @property
+    def api(self):
+        if self._api is None or self._api.session is not self.session:
+            self._api = OJApi(self.root, self.domain, session=self.session,
+                              username=self.username, password=self.password)
+        return self._api.with_domain(self.domain)
 
     # ── 解析 ──
     @property
@@ -80,10 +89,7 @@ class TestDataSupplement:
     def get_problem(self) -> dict | None:
         """获取题目，检测是否有测试数据"""
         try:
-            r = self.session.get(f"{self.api_base}/p/{self.pid}",
-                                 headers={"Accept": "application/json"}, timeout=15)
-            r.raise_for_status()
-            data = r.json()
+            data = self.api.problems.get(self.pid)
             pdoc = data.get("pdoc", {})
             title = pdoc.get("title", f"P{self.pid}")
             content = pdoc.get("content", "")
@@ -208,10 +214,7 @@ class TestDataSupplement:
     # ── Phase 4: 检查 std.cpp ──────────────────────────
     def list_testdata(self) -> list[dict]:
         try:
-            r = self.session.get(
-                f"{self.api_base}/p/{self.pid}/files",
-                headers={"Accept": "application/json"}, timeout=15)
-            return r.json().get("testdata", [])
+            return self.api.get(f"/p/{self.pid}/files", timeout=15).get("testdata", [])
         except Exception:
             return []
 
@@ -321,16 +324,9 @@ class TestDataSupplement:
     def trigger_generation(self, gen_file: str = "data.cpp", count: int = 20) -> bool:
         """触发 OJ 生成测试数据。需要 std.cpp 和数据生成器已上传。"""
         try:
-            r = self.session.post(
-                f"{self.api_base}/p/{self.pid}/files",
-                data={
-                    "operation": "generate_testdata",
-                    "gen": gen_file,
-                    "std": "std.cpp",
-                    "count": str(count),
-                },
-                headers={"Accept": "application/json"},
-                timeout=30)
+            r = self.api.post(f"/p/{self.pid}/files", raw=True,
+                data={"operation": "generate_testdata", "gen": gen_file,
+                      "std": "std.cpp", "count": str(count)}, timeout=30)
             if r.status_code == 200:
                 log.info("[+] 测试数据生成已触发 (gen=%s, count=%d)", gen_file, count); return True
             log.warning("[-] 触发生成失败: status=%d", r.status_code)
@@ -350,41 +346,30 @@ class TestDataSupplement:
     # ── 辅助: 检查题解数 ──
     def has_existing_solutions(self) -> bool:
         try:
-            r = self.session.get(
-                f"{self.api_base}/p/{self.pid}/files",
-                headers={"Accept": "application/json"}, timeout=15)
-            return r.json().get("solutionCount", 0) > 0
+            return self.api.get(f"/p/{self.pid}/files", timeout=15).get("solutionCount", 0) > 0
         except Exception:
             return False
 
     # ── 辅助: 提交代码并等待 AC（带修正）──
     def submit_and_verify_ac(self, code: str, lang: str = "cc.cc14o2") -> bool:
         """提交代码到 OJ，等待评测，非 AC 则修正，直到 AC 或放弃。"""
-        # 提交
-        r = self.session.post(
-            f"{self.api_base}/p/{self.pid}/submit",
-            data={"lang": lang, "code": code},
-            headers={"Accept": "application/json"}, timeout=15)
-        if r.status_code not in (200, 302, 303):
-            log.warning("  [-] 提交失败: status=%d", r.status_code)
+        try:
+            rid = self.api.records.submit(self.pid, code, lang=lang)
+        except OJError as exc:
+            log.warning("  [-] 提交失败: %s", exc)
             return False
-        rid = None
-        if r.status_code == 200:
-            rid = r.json().get("rid", "")
-        else:
-            m = re.search(r"/record/([a-f0-9]+)", r.headers.get("Location", ""))
-            if m: rid = m.group(1)
-        if not rid:
-            log.warning("  [-] 无法获取 rid"); return False
 
         # 等待评测
         log.info("  [*] 等待评测 rid=%s ...", rid[:12])
-        record_url = f"{self.api_base}/record/{rid}" if self.domain != "system" else f"{self.root}/record/{rid}"
+        score = 0
         for _ in range(30):
             time.sleep(10)
-            rr = self.session.get(record_url, headers={"Accept": "application/json"}, timeout=15)
-            if rr.status_code != 200: continue
-            rdoc = rr.json().get("rdoc", {})
+            try:
+                data = (self.api.get(f"/record/{rid}", domain=False, timeout=15)
+                        if self.domain == "system" else self.api.records.get(rid))
+            except OJError:
+                continue
+            rdoc = data.get("rdoc", {})
             cases = rdoc.get("testCases", [])
             score = rdoc.get("score", 0)
             if not cases: continue  # 还在评测

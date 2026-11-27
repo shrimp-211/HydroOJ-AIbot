@@ -8,6 +8,7 @@ import os, re, sys, json, time, logging, argparse, tempfile, shutil, threading
 from pathlib import Path
 from datetime import datetime
 from hydroai.oj.catalog import list_contests, positive_int
+from hydroai.oj.api import OJApi
 
 from hydroai.oj.common import (load_dotenv, create_session, smart_login,
                        parse_contest_or_problem, parse_problem_url)
@@ -33,6 +34,13 @@ class BenchmarkSolver:
         self.model = model or cfg.benchmark_model or cfg.ai_model
         self.benchmark_users = set(str(x) for x in cfg.get("benchmark_users", [2]))
         self.processed = self._load_processed()
+        self._api = None
+
+    def _gateway(self, domain="system"):
+        if self._api is None or self._api.session is not self.session:
+            self._api = OJApi(self.root, session=self.session, username=self.username,
+                              password=self.password)
+        return self._api.with_domain(domain)
 
     def login(self) -> bool:
         return smart_login(self.session, self.root, self.username, self.password)
@@ -66,12 +74,7 @@ class BenchmarkSolver:
     def get_scoreboard(self, domain: str, cid: str) -> dict | None:
         try:
             with self._oj_sem:
-                r = self.session.get(
-                    f"{self.root}/d/{domain}/contest/{cid}/scoreboard",
-                    headers={"Accept": "application/json"}, timeout=15)
-            if r.status_code != 200:
-                return None
-            return r.json()
+                return self._gateway(domain).contests.scoreboard(cid)
         except Exception as e:
             log.warning("获取排行榜失败 %s/%s: %s", domain, cid[:12], e)
             return None
@@ -136,11 +139,11 @@ class BenchmarkSolver:
             record_id = m.group(1) if m else record_id
         try:
             with self._oj_sem:
-                url = f"{self.root}/record/{record_id}" if domain == "system" else f"{self.root}/d/{domain}/record/{record_id}"
-                r = self.session.get(url, headers={"Accept": "application/json"}, timeout=15)
-            if r.status_code != 200:
-                return None
-            rdoc = r.json().get("rdoc", {})
+                api = self._gateway(domain)
+                # system 旧接口使用根路径，保持兼容。
+                data = (api.get(f"/record/{record_id}", domain=False)
+                        if domain == "system" else api.records.get(record_id))
+            rdoc = data.get("rdoc", {})
             return {
                 "code": rdoc.get("code", ""),
                 "lang": rdoc.get("lang", "cc.cc14o2"),
@@ -168,13 +171,9 @@ class BenchmarkSolver:
         )
         try:
             with self._oj_sem:
-                r = self.session.get(
-                    f"{self.root}/d/{domain}/p/{pid}/solution",
-                    headers={"Accept": "application/json"}, timeout=15,
-                    params={"page": 1, "limit": 50})
-            if r.status_code != 200:
-                return False
-            for psdoc in r.json().get("psdocs", []):
+                data = self._gateway(domain).get(f"/p/{pid}/solution",
+                                                 params={"page": 1, "limit": 50})
+            for psdoc in data.get("psdocs", []):
                 if pat.search(psdoc.get("content", "")):
                     return True
         except Exception as e:
@@ -248,12 +247,7 @@ class BenchmarkSolver:
     # ── 获取题目信息 ──
     def get_problem(self, domain: str, pid: str) -> dict | None:
         try:
-            r = self.session.get(
-                f"{self.root}/d/{domain}/p/{pid}",
-                headers={"Accept": "application/json"}, timeout=15)
-            if r.status_code != 200:
-                return None
-            pdoc = r.json().get("pdoc", {})
+            pdoc = self._gateway(domain).problems.get(pid).get("pdoc", {})
             content = pdoc.get("content", "")
             if isinstance(content, dict):
                 content = content.get("zh", str(content))
@@ -274,14 +268,7 @@ class BenchmarkSolver:
     def post_solution(self, domain: str, pid: str, content: str) -> str | None:
         try:
             with self._oj_sem:
-                r = self.session.post(
-                f"{self.root}/d/{domain}/p/{pid}/solution",
-                json={"operation": "submit", "content": content},
-                headers={"Accept": "application/json"}, timeout=15)
-            if r.status_code == 200:
-                psid = r.json().get("psid", "")
-                return psid
-            log.warning("发布题解失败: status=%d", r.status_code)
+                return self._gateway(domain).solutions.post(pid, content)
         except Exception as e:
             log.warning("发布题解异常: %s", e)
         return None

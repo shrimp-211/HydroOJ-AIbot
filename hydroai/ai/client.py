@@ -99,11 +99,11 @@ def _ai_delay():
 # AIClient — 封装 AI API 调用
 # ═══════════════════════════════════════════════════════════════
 class AIClient:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, show_thinking: bool | None = None):
         self.config = config
         self._clients: dict[tuple, object] = {}  # lazy cache by (base_url, api_key)
         self._client_lock = threading.Lock()
-        self._show_thinking = config.get("show_thinking", False)
+        self._show_thinking = config.get("show_thinking", False) if show_thinking is None else show_thinking
         self._unknown_price_warned = set()
         # 由求解器设置，用于把本次 AI 调用归到具体题目（逐请求统计）。
         self.problem_id = ""

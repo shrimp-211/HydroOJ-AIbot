@@ -367,27 +367,35 @@ class TestPushMessage403:
         assert oj_common._send_round(_FakeSession(), "https://x", "hi", {7}) is True
 
     def test_relogin_and_retry_once(self, monkeypatch):
-        monkeypatch.setattr(oj_common, "MSG_LIMITER", _NoLimiter())
+        from hydroai.oj.api import OJApi
         calls = []
-        monkeypatch.setattr(oj_common, "_recover_login",
-                            lambda session, root: calls.append(root))
-        session = _FakeSession()
+        monkeypatch.setattr(OJApi, "_relogin", lambda self: calls.append(self.root) or True)
+        monkeypatch.setattr("hydroai.oj.api.RateLimiter.wait", lambda self: None)
+        class Session:
+            def __init__(self):
+                self.calls = []
+            def request(self, method, url, **kwargs):
+                self.calls.append(kwargs["json"])
+                return _FakeResponse(403 if len(self.calls) == 1 else 200)
+        monkeypatch.setattr(_FakeResponse, "json", lambda self: {}, raising=False)
+        session = Session()
         oj_common.push_oj_message(session, "https://x", "hi", push_uids=[7])
-        assert calls == ["https://x"]              # 触发了一次重新登录
-        assert len(session.calls) == 2             # 并且重试了一轮
+        assert calls == ["https://x"]
+        assert len(session.calls) == 2
 
     def test_no_retry_without_403(self, monkeypatch):
-        monkeypatch.setattr(oj_common, "MSG_LIMITER", _NoLimiter())
+        from hydroai.oj.api import OJApi
         calls = []
-        monkeypatch.setattr(oj_common, "_recover_login",
-                            lambda session, root: calls.append(root))
-
-        class Ok(_FakeSession):
-            def post(self, url, json=None, headers=None, timeout=None):
-                self.calls.append(json)
+        monkeypatch.setattr(OJApi, "_relogin", lambda self: calls.append(self.root))
+        monkeypatch.setattr("hydroai.oj.api.RateLimiter.wait", lambda self: None)
+        monkeypatch.setattr(_FakeResponse, "json", lambda self: {}, raising=False)
+        class Session:
+            def __init__(self):
+                self.calls = []
+            def request(self, method, url, **kwargs):
+                self.calls.append(kwargs["json"])
                 return _FakeResponse(200)
-
-        session = Ok()
+        session = Session()
         oj_common.push_oj_message(session, "https://x", "hi", push_uids=[7])
         assert calls == [] and len(session.calls) == 1
 

@@ -8,11 +8,11 @@ import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from requests import RequestException
+from urllib.parse import parse_qsl, urlsplit
 
 from hydroai.config.manager import ConfigManager
 from hydroai.config.paths import data_file, project_root
+from hydroai.oj.api import OJApi, OJError
 from hydroai.oj.common import (
     RateLimiter, create_session, fetch_user_id, load_dotenv, parse_contest_or_problem,
     parse_problem_url, push_oj_message, smart_login,
@@ -62,14 +62,23 @@ def _push(text: str, to_uid: int = 0, event: str = ""):
         log.debug("[!] push failed: %s", e)
 
 
+def _gateway(session, base_url, domain):
+    return OJApi(base_url, domain, session=session,
+                 username=os.environ.get("OJ_USERNAME", ""),
+                 password=os.environ.get("OJ_PASSWORD", ""))
+
+
 def has_existing_solution(session, base_url, domain_id, pid, uid):
     try:
         with _session_lock:
-            r = session.get(f"{base_url}/d/{domain_id}/p/{pid}/solution",
-                            headers={"Accept": "application/json"}, timeout=15)
-        if r.status_code != 200: return False
-        for doc in r.json().get("psdocs", []):
+            data = _gateway(session, base_url, domain_id).solutions.list(pid)
+        for doc in data.get("psdocs", []):
             if doc.get("owner") == uid: return True
+    except OJError as e:
+        if e.status:
+            return False
+        log.warning("[!] 检查已有题解异常 #%s: %s — 保守跳过", pid, str(e)[:80])
+        return True
     except Exception as e:
         log.warning("[!] 检查已有题解异常 #%s: %s — 保守跳过", pid, str(e)[:80])
         return True  # 不确定时跳过，防止重复
@@ -78,10 +87,7 @@ def has_existing_solution(session, base_url, domain_id, pid, uid):
 
 def attend_contest(session, base_url, domain_id, contest_id):
     try:
-        r = session.post(f"{base_url}/d/{domain_id}/contest/{contest_id}",
-                         json={"operation": "attend"},
-                         headers={"Accept": "application/json"}, timeout=15)
-        return r.status_code == 200
+        return _gateway(session, base_url, domain_id).contests.attend(contest_id)
     except Exception: return False
 
 
@@ -147,9 +153,12 @@ class ProblemDiscoveryError(RuntimeError):
 
 def _read_target(session, url):
     try:
-        response = session.get(url, headers={"Accept": "application/json"}, timeout=15)
-    except RequestException as exc:
-        raise ProblemDiscoveryError(f"请求失败：{type(exc).__name__}") from exc
+        parsed = urlsplit(url)
+        root = f"{parsed.scheme}://{parsed.netloc}"
+        response = _gateway(session, root, "system").get(
+            parsed.path, domain=False, params=parse_qsl(parsed.query), raw=True, timeout=15)
+    except OJError as exc:
+        raise ProblemDiscoveryError(f"请求失败：{exc}") from exc
     if response.status_code != 200:
         raise ProblemDiscoveryError(f"HTTP {response.status_code}")
     try:

@@ -10,6 +10,7 @@ import requests
 
 from hydroai.config.manager import ConfigManager
 from hydroai.oj.common import create_session, load_cookies, smart_login
+from hydroai.oj.api import OJApi, OJError
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,18 @@ class OJClient:
         if jar_path and load_cookies(self.session, jar_path):
             self.logged_in = True
         self.verify_timeout = config["verify_timeout"]
+        self._api = None
+
+    @property
+    def api(self):
+        # 保留公开的 session 可替换契约；网关始终复用当前会话。
+        if self._api is None or self._api.session is not self.session:
+            domain = self.api_base.rsplit("/d/", 1)[-1] if "/d/" in self.api_base else "system"
+            self._api = OJApi(self.root, domain, session=self.session,
+                              username=getattr(self.config, "username", ""),
+                              password=getattr(self.config, "password", ""),
+                              cookie_jar="", min_interval=0.3)
+        return self._api
 
     # ---- 登录 ----
     def login(self, max_retries: int = 3) -> bool:
@@ -58,9 +71,8 @@ class OJClient:
     def get_problem(self, pid: str) -> dict | None:
         log.info("[*] 获取题目 #%s ...", pid)
         try:
-            resp = self.session.get(f"{self.api_base}/p/{pid}",
-                                    headers={"Accept": "application/json"}, timeout=15)
-        except requests.RequestException as e:
+            resp = self.api.get(f"/p/{pid}", raw=True, timeout=15)
+        except OJError as e:
             log.error("[-] 获取题目网络异常: %s", e); return None
         if resp.status_code != 200:
             log.error("[-] 获取失败，状态码 %d", resp.status_code); return None
@@ -226,43 +238,24 @@ class OJClient:
     # ---- 提交代码 ----
     def submit_code(self, pid: str, code: str, contest_id: str = "") -> str | None:
         log.info("[*] 提交代码到 #%s ...", pid)
-        data = {"lang": self.config["lang"], "code": code}
-        if contest_id:
-            data["tid"] = contest_id
-            log.info("    (关联比赛 %s)", contest_id[:12])
         try:
-            resp = self.session.post(f"{self.api_base}/p/{pid}/submit",
-                data=data, allow_redirects=False, timeout=15)
-        except requests.RequestException as e:
-            log.error("[-] 提交异常: %s", e); return None
-        if resp.status_code in (302, 303):
-            m = re.search(r"/record/([a-f0-9]+)", resp.headers.get("Location", ""))
-            if m:
-                log.info("[+] 提交成功，记录: %s/record/%s", self.api_base, m.group(1))
-                return m.group(1)
-        if resp.status_code == 429:
-            log.warning("[-] 提交限流(429)，%ds 后重试", 3)
-            time.sleep(3)
-            try:
-                resp = self.session.post(f"{self.api_base}/p/{pid}/submit",
-                    data=data, allow_redirects=False, timeout=15)
-                if resp.status_code in (302, 303):
-                    m = re.search(r"/record/([a-f0-9]+)", resp.headers.get("Location", ""))
-                    if m: return m.group(1)
-            except requests.RequestException: pass
-        log.error("[-] 提交失败，status=%d", resp.status_code); return None
+            rid = self.api.records.submit(pid, code, lang=self.config["lang"], tid=contest_id)
+            log.info("[+] 提交成功，记录: %s/record/%s", self.api_base, rid)
+            return rid
+        except OJError as e:
+            log.error("[-] 提交失败: %s", e)
+            return None
 
     # ---- 验证评测 ----
     def verify_submission(self, rid: str) -> dict | None:
         log.info("[*] 等待评测完成 (rid=%s) ...", rid)
-        url = f"{self.api_base}/record/{rid}"
         waited, delay = 0, 2
         rdoc = None
         while waited < self.verify_timeout:
             # 1) 网络请求
             try:
-                resp = self.session.get(url, headers={"Accept": "application/json"}, timeout=10)
-            except requests.RequestException as e:
+                resp = self.api.get(f"/record/{rid}", raw=True, timeout=10)
+            except OJError as e:
                 log.warning("    网络异常: %s，%ds 后重试", str(e)[:40], delay)
                 time.sleep(delay); waited += delay
                 delay = min(delay * 2, 256)
@@ -438,16 +431,12 @@ class OJClient:
     def post_solution(self, pid: str, solution_md: str) -> str | None:
         log.info("[*] 发布题解到 P%s 题解区 ...", pid)
         try:
-            resp = self.session.post(f"{self.api_base}/p/{pid}/solution",
-                json={"operation": "submit", "content": solution_md},
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-                timeout=15)
-        except requests.RequestException as e:
-            log.error("[-] 发布题解网络异常: %s", e); return None
-        if resp.status_code == 200:
-            data = resp.json(); psid = data.get("psid", "")
+            psid = self.api.solutions.post(pid, solution_md)
             if psid:
                 log.info("[+] 题解发布成功，psid=%s", psid)
                 log.info("    题解页面: %s/p/%s/solution", self.api_base, pid)
                 return psid
-        log.error("[-] 题解发布失败，status=%d, body=%s", resp.status_code, resp.text[:200]); return None
+            log.error("[-] 发布题解失败：未返回题解 ID")
+        except OJError as e:
+            log.error("[-] 发布题解失败: %s", e)
+        return None

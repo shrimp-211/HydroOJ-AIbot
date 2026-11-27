@@ -115,20 +115,21 @@ def _recover_login(session, root: str):
 
 def push_oj_message(session, root: str, text: str, push_uids: list[int] = None,
                     requester: int = 0):
-    """向 OJ 用户发送私信。限速 + 403 自动重新登录重试。"""
-    targets = set()
+    """向 OJ 用户发送私信，复用共享网关的限速和登录恢复。"""
+    targets = set(push_uids or ())
     if requester > 0:
         targets.add(requester)
-    if push_uids:
-        targets.update(push_uids)
     if not targets:
         return
-    got_403 = _send_round(session, root, text, targets)
-    # 403 后重新登录并重试一轮
-    if got_403:
-        logging.getLogger(__name__).warning("[!] 推送 403，重新登录后重试")
-        _recover_login(session, root)
-        _send_round(session, root, text, targets)
+    from hydroai.oj.api import OJApi
+    from hydroai.oj.notify import Notifier
+    api = OJApi(root, session=session, username=os.environ.get("OJ_USERNAME", ""),
+                password=os.environ.get("OJ_PASSWORD", ""), min_interval=0.6,
+                retry_message_403=True)
+    api._shared["limiter"] = MSG_LIMITER
+    notifier = Notifier(api)
+    for uid in targets:
+        notifier.send(uid, text)
 
 
 def _send_round(session, root: str, text: str, targets: set) -> bool:
@@ -279,7 +280,7 @@ def create_session(verify_ssl: bool = True) -> requests.Session:
     # 否则并发请求会退化为串行等待空闲连接。
     retry = RateLimitRetry(total=3, backoff_factor=2,
                            status_forcelist=[429, 502, 503, 504],
-                           allowed_methods=["GET", "POST"])
+                           allowed_methods=["GET", "HEAD"])
     adapter = HTTPAdapter(max_retries=retry, pool_connections=32, pool_maxsize=32)
     s.mount("https://", adapter)
     s.mount("http://", adapter)

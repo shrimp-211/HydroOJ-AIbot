@@ -31,7 +31,7 @@ class AppConfig:
     ai_health_check_timeout: int = 15       # 单个模型探测超时秒数
     ai_task_tokens: dict = field(default_factory=lambda: {
         "default": 16384, "solve": 16384, "plan": 4096, "reference": 8192,
-        "difficulty": 1024, "editorial": 8192,
+        "difficulty": 1024, "editorial": 8192, "insight": 4096, "assistant": 4096,
     })
     pricing_auto_update: bool = True
     pricing_refresh_hours: int = 6
@@ -90,6 +90,21 @@ class AppConfig:
     max_cost_per_problem: float = 5.0
     cost_accum_enable: bool = True  # 单题金额长期累计（跨调用），False 则仅按单次会话限额
     msg_push_events: dict[str, bool] = field(default_factory=dict)
+    # 学情诊断模块（insight）
+    insight_db: str = "insight.db"           # 长期记录库（位于数据目录）
+    insight_model: str = ""                  # 分析用模型（空=默认模型）
+    insight_max_per_student: int = 5         # 每次扫描每名学生最多深度分析几条提交
+    insight_lookback_days: int = 30          # 扫描最近多少天的提交
+    # @ 助手模块（assistant）
+    assistant_enable: bool = True
+    assistant_domains: list[str] = field(default_factory=list)  # 只响应显式配置的域
+    assistant_model: str = ""                # 助手模型（空=默认模型）
+    assistant_interval: int = 10             # 收件箱轮询间隔（秒）
+    assistant_max_steps: int = 8             # 单次 @ 最多几步工具调用
+    assistant_max_replies_per_thread: int = 6  # 单个讨论最多自动回复条数
+    assistant_reveal_code: bool = False      # 是否允许直接贴出完整标准代码
+    assistant_users: list[int] = field(default_factory=list)  # 允许触发的用户 UID，空=不限
+    assistant_dry_run: bool = False          # 只生成回复并打印，不真正发出
     code_obfuscate: dict[str, bool] = field(default_factory=dict)
 
     def clone(self) -> "AppConfig":

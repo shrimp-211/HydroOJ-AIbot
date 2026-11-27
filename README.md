@@ -19,9 +19,36 @@
 
 所有命令请在项目目录运行。Docker 已设置独立的数据目录，无需手动管理工作路径。
 
+## 模块入口
+
+`python hydro.py modules` 列出模块，`python hydro.py <模块> --help` 查看参数。现有脚本与默认 Web / 守护进程启动行为不变。
+
+| 模块 | 用途 |
+| --- | --- |
+| `solver` | 单题求解、比赛或训练批量求解、标程题解及测试数据补充。求解与题解生成依旧使用现有模型配置、评测验证和费用统计。 |
+| `ojkit` | Hydro 会话和资源接口，包括题目、提交/评测、题解、讨论/楼中楼、私信、比赛/排行榜、训练、作业和域排名。既可从 CLI 操作，也可通过 `hydroai.oj.api.OJApi` 调用。 |
+| `insight` | 按域、学生、题目筛选代表提交，结合代码与评测做诊断，在 SQLite 记录历次问题与改善情况，生成个人及班级报告。 |
+| `assistant` | 接收 Hydro 系统用户 `uid=1` 发出的 @ 通知，结合讨论、关联题目、已有题解和提问者的代表提交答疑。 |
+
+```bash
+python hydro.py solver solve https://oj.yuanyicode.com/d/root_test/p/26 --dry-run
+python hydro.py ojkit --domain root_test records --uid 35 --pid 26
+python hydro.py insight --domain root_test scan --uid 35 --days 1000 --max 3 --dry-run
+python hydro.py insight --domain root_test scan --uid 35 --days 1000 --max 3
+python hydro.py insight --domain root_test report --uid 35
+```
+
+### 学情与 @ 助教
+
+- 学情扫描每名学生每题最多选一条，综合首次通过前的卡点、尚未通过的题和新提交是否带来有效证据。`scan --all` 可扫描域内近期活跃学生。需要长期积累时，用系统任务计划定期运行 `scan`；历史存于 `OJ_DATA_DIR/insight.db`。诊断与知识点趋势是基于代码和评测的推断，不是正式评分，也不要把一次错误当作长期能力结论。
+- 在 `config/config.json` 显式配置 `"assistant_domains": ["root_test"]` 后才会响应测试域的通知。可另设 `assistant_users` 限制触发者。先执行 `python hydro.py assistant run --once --dry-run` 预览近期通知，确认后用 `python hydro.py assistant run` 单独启动常驻进程。没有新通知时，可用 `python hydro.py assistant handle <讨论ID或URL> --as-user <UID> --dry-run` 预览既有讨论。`python hydro.py assistant status` 查看处理记录。预览可能调用模型，但不会向 OJ 发出回复；正式轮询仍可以处理预览过的通知。
+- 普通答疑可在讨论里 @ 回复或在已有题解下补充讲解，然后把题解链接发回讨论。识别到学生提交代码时，会结合代码与评测证据**仅私信提问者本人**，不公开学生代码和画像；不在宿主机运行学生提交，不因讨论内容自动提交代码或发布新题解。模型故障会记录在状态里，而不是伪造诊断。
+- 这两个模块可能把学生代码和相关文本发给所配置的模型供应商；请使用适合处理学生数据的服务并限制数据库、诊断导出和预览日志的访问权限。试运行不需要安装 Hydro 插件，依赖原生页面 JSON 接口和账号现有权限。
+- Docker 也可使用同样的模块命令，例如 `docker compose --env-file config/.env run --rm cli assistant run --once --dry-run`，数据沿用 `/data` 卷。
+
 ## 项目结构
 
-代码按领域拆分在 `hydroai/` 包中，仓库根目录只保留兼容入口脚本：
+代码按领域拆分在 `hydroai/` 包中，根目录提供统一入口和兼容脚本：
 
 ```text
 config/     用户配置：config.json、.env 及模板
@@ -31,7 +58,10 @@ hydroai/
   ai/       AI 客户端、协议、路由、定价、提示词
   oj/       HydroOJ 客户端、目录与样例解析、本地评测
   solve/    单题/比赛求解、Agent、题解、测试数据
-  monitor/  比赛守护、私信、OneBot
+  insight/  代表提交筛选、诊断与长期学情报告
+  assistant/ 系统 @ 通知、上下文组装和受限答疑
+  modules/  统一入口的模块声明与路由
+  monitor/  比赛守护、私信指令、OneBot
   usage/    请求账本、订阅额度、任务状态与历史
   web/      管理面板、会话鉴权、子进程和实时日志
 tests/      离线测试（由 pytest.ini 指定 pythonpath）
